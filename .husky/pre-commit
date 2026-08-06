@@ -1,0 +1,4 @@
+#!/bin/sh
+
+npx depcruise src bin test --config .dependency-cruiser.cjs
+npx tsc --noEmit
