@@ -33,7 +33,6 @@ export interface JSONSchema {
   description?: string;
   enum?: JSONValue[];
   default?: JSONValue;
-  [key: string]: unknown;
 }
 
 export type SessionId = string;
@@ -51,7 +50,7 @@ export type Millis = number;
 //   - 消息本身无行为，处理逻辑都在外部函数里
 // ============================================================================
 
-export type Role = 'user' | 'assistant' | 'toolResult' | 'summary';
+export type Role = Message['role'];
 
 export type Message =
   | UserMessage
@@ -516,6 +515,7 @@ export interface Store {
 export interface TraceContext {
   traceId: string;
   spanId: string;
+  parentSpanId?: string;
   child(name: string): TraceContext;
 }
 
