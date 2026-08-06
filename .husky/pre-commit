@@ -1,4 +1,4 @@
 #!/bin/sh
 
 npx depcruise src bin test --config .dependency-cruiser.cjs
-npx tsc --noEmit
+npx tsc -p tsconfig.json --noEmit && npx tsc -p tsconfig.bin.json --noEmit
