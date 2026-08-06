@@ -1,1 +1,5 @@
 node_modules
+dist
+bin/agent.js
+bin/agent.js.map
+*.tsbuildinfo

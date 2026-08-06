@@ -1,24 +1,29 @@
 {
   "name": "ppagent",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "0.1.0",
+  "description": "为本地部署模型设计的 coding agent harness",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "npm run build:src && npm run build:bin",
+    "build:src": "tsc -p tsconfig.json",
+    "build:bin": "tsc -p tsconfig.bin.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "depcruise": "depcruise src bin --config .dependency-cruiser.cjs"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fish0710/ppagent.git"
   },
-  "keywords": [],
-  "author": "",
   "license": "ISC",
-  "type": "module",
-  "bugs": {
-    "url": "https://github.com/fish0710/ppagent/issues"
-  },
-  "homepage": "https://github.com/fish0710/ppagent#readme",
   "dependencies": {
     "@earendil-works/pi-ai": "^0.83.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "dependency-cruiser": "^16.7.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
   }
 }

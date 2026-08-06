@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "outDir": "bin",
+    "rootDir": "bin"
+  },
+  "include": ["bin/**/*.ts"],
+  "exclude": []
+}
