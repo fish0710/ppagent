@@ -33,6 +33,11 @@ export interface JSONSchema {
   description?: string;
   enum?: JSONValue[];
   default?: JSONValue;
+  /**
+   * 严格模式必需。OpenAI structured outputs 要求顶层 schema 显式
+   * 声明 additionalProperties: false，部分本地服务也依赖它拒绝多余参数。
+   */
+  additionalProperties?: boolean;
 }
 
 export type SessionId = string;
@@ -52,11 +57,7 @@ export type Millis = number;
 
 export type Role = Message['role'];
 
-export type Message =
-  | UserMessage
-  | AssistantMessage
-  | ToolResultMessage
-  | SummaryMessage;
+export type Message = UserMessage | AssistantMessage | ToolResultMessage;
 
 export interface UserMessage {
   role: 'user';
@@ -91,22 +92,10 @@ export interface ToolResultMessage {
 }
 
 /**
- * compact 后替换掉一段历史消息的摘要。
- *
- * 单列一个成员而非复用 UserMessage，是为了让穷尽性检查逼着每个
- * switch 显式处理它 —— 压缩过的上下文在 token 计账、trace 归因、
- * 二次压缩时的行为都和普通消息不同。
+ * 注：compact 产生的摘要不是独立的消息种类，就是一条普通消息
+ * （建议用 UserMessage，见 §9 的说明）。压缩的元信息属于持久层，
+ * 记在 StoreRecord 的 compaction 记录上，不混进消息本身。
  */
-export interface SummaryMessage {
-  role: 'summary';
-  summary: string;
-  /** 被它替换掉的原始消息条数与 token 数，用于观测压缩收益 */
-  replacedCount: number;
-  replacedTokens: number;
-  /** 触发这次压缩的原因 */
-  trigger: CompactTrigger;
-  timestamp: Millis;
-}
 
 export type ContentBlock =
   | TextBlock
@@ -441,8 +430,11 @@ export interface CompactSignals {
 }
 
 export interface CompactResult {
+  /** 压缩后的完整上下文：[摘要, ...保留的最近消息] */
   messages: Message[];
+  summary: Message;
   trigger: CompactTrigger;
+  replacedCount: number;
   tokensBefore: number;
   tokensAfter: number;
 }
@@ -452,25 +444,87 @@ export interface CompactPolicy {
   compact(
     messages: Message[],
     trigger: CompactTrigger,
-    summarize: Summarize,
+    summarizer: Summarizer,
   ): Promise<CompactResult>;
 }
 
 /**
- * 由 loop 在构造 context 时注入。
+ * 摘要生成策略。可插拔，便于用真实任务指标横向评估。
  *
- * 压缩需要调模型生成摘要，但 context 不认识 llm 层 —— 否则会形成
- * loop → context → llm → 结果写回 context 的双向依赖。注入回调
- * 保持了 core 各组件互不认识、可独立单测。
+ * 由 loop 在构造 context 时注入 —— context 不认识 llm 层，否则会形成
+ * loop → context → llm → 结果写回 context 的双向依赖。注入保持了 core
+ * 各组件互不认识、可独立单测。需要整个 loop 的策略（如 subagent 摘要）
+ * 在 agent/session.ts 里构造后注入，接口在手不会形成循环依赖。
+ *
+ * 预期实现：
+ *   - 'structural'  纯规则裁剪，不调模型。工具输出占历史体积的绝大部分，
+ *                   read 只留路径与行数、bash 只留退出码与末尾若干行、
+ *                   失败重试链只留成功那次，而 toolCall 的名称与参数全部
+ *                   保留（那是 agent 的行动轨迹，最不该丢）。
+ *                   零延迟、零 GPU、零幻觉 —— 对本地模型可能优于调模型。
+ *   - 'llm'         直接调一次模型
+ *   - 'subagent'    交给子 agent，受 AdmissionController 约束
  */
-export type Summarize = (messages: Message[]) => Promise<string>;
+export interface Summarizer {
+  readonly id: string;
+  summarize(req: SummarizeRequest): Promise<SummarizeResult>;
+}
+
+export interface SummarizeRequest {
+  /**
+   * 上一次压缩产生的摘要。
+   *
+   * 不变量：摘要是累积的。存在 previousSummary 时，新摘要必须涵盖它
+   * 所概括的全部历史 —— 因为内存视图只保留最近一条摘要及其之后的消息，
+   * 旧摘要会被丢弃。违反此约束会静默丢失早期历史，症状是 agent 突然
+   * 忘记任务目标，且不报错。
+   */
+  previousSummary?: Message;
+  /** 本次要折叠的消息 */
+  messages: Message[];
+  /** 任务背景，部分策略需要 */
+  systemPrompt?: string;
+  /** 期望的压缩后 token 量 */
+  targetTokens?: number;
+  signal: AbortSignal;
+  trace: TraceContext;
+}
+
+export interface SummarizeResult {
+  /**
+   * 摘要消息。建议用 UserMessage —— 覆盖式压缩后它是上下文首条，
+   * 而 Anthropic API 要求首条为 user，部分本地服务同样挑剔。
+   * 语义上也更准：摘要不是模型说过的话，是 harness 塞的背景材料。
+   */
+  summary: Message;
+  /** 策略自报的元信息，横向评估时用 */
+  meta: SummarizeMeta;
+}
+
+export interface SummarizeMeta {
+  strategy: string;
+  tokensIn: number;
+  tokensOut: number;
+  latencyMs: number;
+  /** 调用模型的次数。纯规则裁剪为 0。 */
+  modelCalls: number;
+}
 
 // ============================================================================
 // 10. 持久化
 //
-// append-only 的记录流，而非可变的消息数组。
-// compact 本身也是一条记录 —— 这样 JSONL 永远只追加不重写，
-// 崩溃恢复时按 seq 回放即可重建，也保留了压缩前的原始历史。
+// append-only 的记录流，而非可变的消息数组。compact 本身也是一条记录 ——
+// JSONL 永远只追加不重写，压缩前的原始消息一个字节都不删。
+//
+// 三层分工：
+//   store   磁盘  全量记录，append-only，永不丢失
+//   replay  纯函数  记录 → 消息数组，是投影而非解码
+//   context 内存  实际发给模型的视图
+//
+// replay 有两种投影：
+//   'compacted'  最后一条 compaction 的 summary + 其后的 message（默认，
+//                也是 --resume 该用的；用全量恢复会立刻爆上下文）
+//   'full'       忽略 compaction，返回全部 message（调试回溯用）
 // ============================================================================
 
 export type StoreRecord =
@@ -478,10 +532,20 @@ export type StoreRecord =
   | {
       kind: 'compaction';
       seq: number;
-      /** 被替换的 seq 区间，闭区间 */
-      replacedFrom: number;
-      replacedTo: number;
-      summary: SummaryMessage;
+      /**
+       * 摘要消息。语义是覆盖式的：它涵盖本记录之前的全部历史。
+       * 因此 replay 只需找到最后一条 compaction，取其 summary
+       * 加上其后的 message 记录即可，无需处理区间。
+       */
+      summary: Message;
+      trigger: CompactTrigger;
+      /** 观测压缩收益用 */
+      replacedCount: number;
+      tokensBefore: number;
+      tokensAfter: number;
+      /** 摘要策略的自报元信息，横向评估时用 */
+      meta: SummarizeMeta;
+      timestamp: Millis;
     };
 
 export interface SessionMeta {
@@ -588,7 +652,15 @@ export interface ContextConfig {
   compactThreshold: number;
   /** 内存压力触发 compact 的阈值，0–1。M10 前不生效。 */
   memPressureThreshold: number;
-  /** 压缩时保留最近 N 条消息不动 */
+  /**
+   * 压缩时保留最近 N 条消息不动。
+   *
+   * 注意这只是起点，不是切点：边界不得切断 toolCall 与其 toolResult 的
+   * 配对。compact 在调模型前触发，此刻末尾常常正是 toolResult，若从中间
+   * 切开，压缩后的上下文里会出现没有前置 toolCall 的孤儿 toolResult ——
+   * OpenAI 兼容服务对此从 400 到静默乱答都有，本地模型尤其容易崩。
+   * 实现须从 N 处向前找到最近的安全切点。
+   */
   keepRecentMessages: number;
 }
 
