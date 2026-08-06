@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ppagent — 为本地模型设计的 coding agent harness</title>
+<meta name="description" content="云端 agent 假设算力无限。本地模型跑在一台机器上，和 agent 抢同一块统一内存、同一块 GPU。ppagent 是为这个约束重新设计的 coding agent harness。">
+<meta property="og:title" content="ppagent — 为本地模型设计的 coding agent harness">
+<meta property="og:description" content="云端 agent 假设算力无限。本地模型跑在一台机器上，和 agent 抢同一块统一内存、同一块 GPU。">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&family=Lora:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #141413;
+    --ink-soft: #1e1e1c;
+    --ink-line: #2b2b28;
+    --paper: #faf9f5;
+    --gray: #b0aea5;
+    --gray-light: #e8e6dc;
+    --orange: #d97757;
+    --blue: #6a9bcc;
+    --green: #788c5d;
+
+    --display: 'Poppins', Arial, sans-serif;
+    --body: 'Lora', Georgia, serif;
+    --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+
+    --max: 68rem;
+    --gut: clamp(1.25rem, 5vw, 4rem);
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--body);
+    font-size: 1.0625rem;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: inherit; }
+
+  :focus-visible {
+    outline: 2px solid var(--orange);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  .wrap {
+    max-width: var(--max);
+    margin: 0 auto;
+    padding-inline: var(--gut);
+  }
+
+  /* ---------- top bar ---------- */
+
+  .topbar {
+    border-bottom: 1px solid var(--ink-line);
+    position: sticky;
+    top: 0;
+    background: rgba(20, 20, 19, 0.88);
+    backdrop-filter: blur(8px);
+    z-index: 10;
+  }
+  .topbar__inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-block: 0.9rem;
+  }
+  .wordmark {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+    text-decoration: none;
+  }
+  .wordmark b { font-weight: 500; }
+  .wordmark span { color: var(--gray); }
+
+  .status {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--gray);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .status::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+  }
+
+  /* ---------- hero ---------- */
+
+  .hero { padding-block: clamp(3.5rem, 10vw, 7rem) clamp(2.5rem, 6vw, 4rem); }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--orange);
+    margin: 0 0 1.5rem;
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 500;
+    font-size: clamp(2.1rem, 6.2vw, 4rem);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    margin: 0 0 1.75rem;
+    max-width: 22ch;
+  }
+  h1 em {
+    font-style: normal;
+    color: var(--orange);
+  }
+
+  .lede {
+    font-size: clamp(1.05rem, 2.2vw, 1.3rem);
+    line-height: 1.65;
+    max-width: 46ch;
+    color: var(--gray-light);
+    margin: 0 0 2.5rem;
+  }
+
+  /* ---------- signature: unified memory bar ---------- */
+
+  .meter {
+    border: 1px solid var(--ink-line);
+    background: var(--ink-soft);
+    padding: clamp(1.25rem, 3vw, 1.75rem);
+    margin-bottom: 2.5rem;
+  }
+  .meter__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--gray);
+    margin-bottom: 0.9rem;
+  }
+  .meter__head strong {
+    color: var(--paper);
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  #pressure { font-variant-numeric: tabular-nums; }
+  #pressure.is-high { color: var(--orange); }
+
+  .bar {
+    display: flex;
+    height: 2.5rem;
+    background: #0e0e0d;
+    overflow: hidden;
+  }
+  .seg {
+    transition: width 700ms cubic-bezier(.4,0,.2,1);
+    position: relative;
+  }
+  .seg--weights   { background: var(--blue);  opacity: 0.85; }
+  .seg--kv        { background: var(--orange); }
+  .seg--workspace { background: var(--green); opacity: 0.8; }
+  .seg--free      { background: transparent; border-left: 1px solid var(--ink-line); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.4rem;
+    margin-top: 0.9rem;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--gray);
+  }
+  .legend span { display: flex; align-items: center; gap: 0.45rem; }
+  .legend i {
+    width: 9px; height: 9px;
+    display: inline-block;
+    font-style: normal;
+  }
+
+  .meter__caption {
+    margin-top: 1.1rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--ink-line);
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: var(--gray-light);
+    min-height: 2.6em;
+  }
+  .meter__caption b {
+    color: var(--orange);
+    font-weight: 500;
+  }
+
+  /* ---------- buttons ---------- */
+
+  .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+
+  .btn {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+    text-decoration: none;
+    padding: 0.7rem 1.3rem;
+    border: 1px solid var(--paper);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: background 160ms, color 160ms;
+  }
+  .btn--solid { background: var(--paper); color: var(--ink); }
+  .btn--solid:hover { background: var(--orange); border-color: var(--orange); color: var(--paper); }
+  .btn--ghost { color: var(--paper); border-color: var(--ink-line); }
+  .btn--ghost:hover { border-color: var(--gray); }
+
+  /* ---------- sections ---------- */
+
+  section { padding-block: clamp(3rem, 8vw, 5.5rem); }
+  section + section { border-top: 1px solid var(--ink-line); }
+
+  h2 {
+    font-family: var(--display);
+    font-weight: 500;
+    font-size: clamp(1.5rem, 3.4vw, 2.1rem);
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    margin: 0 0 0.75rem;
+  }
+  .section-note {
+    color: var(--gray);
+    max-width: 52ch;
+    margin: 0 0 2.75rem;
+  }
+
+  /* ---------- claim / reality ---------- */
+
+  .swap { display: grid; gap: 1px; background: var(--ink-line); border: 1px solid var(--ink-line); }
+  .swap__row { display: grid; grid-template-columns: 1fr; gap: 1px; background: var(--ink-line); }
+  @media (min-width: 46rem) {
+    .swap__row { grid-template-columns: 1fr 1fr; }
+  }
+  .cell { background: var(--ink); padding: clamp(1.25rem, 3vw, 1.9rem); }
+  .cell__tag {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    margin: 0 0 0.7rem;
+  }
+  .cell--claim { background: var(--ink-soft); }
+  .cell--claim .cell__tag { color: var(--gray); }
+  .cell--claim p { color: var(--gray); margin: 0; }
+  .cell--real .cell__tag { color: var(--orange); }
+  .cell--real p { margin: 0; }
+
+  /* ---------- decisions ---------- */
+
+  .decisions { display: grid; gap: 2.25rem; }
+  @media (min-width: 52rem) {
+    .decisions { grid-template-columns: repeat(3, 1fr); gap: 2.5rem; }
+  }
+  .decision h3 {
+    font-family: var(--display);
+    font-weight: 500;
+    font-size: 1.1rem;
+    margin: 0 0 0.6rem;
+    padding-top: 1rem;
+    border-top: 2px solid var(--orange);
+    letter-spacing: -0.01em;
+  }
+  .decision:nth-child(2) h3 { border-top-color: var(--blue); }
+  .decision:nth-child(3) h3 { border-top-color: var(--green); }
+  .decision p { margin: 0; color: var(--gray-light); font-size: 0.98rem; }
+  .decision code {
+    font-family: var(--mono);
+    font-size: 0.85em;
+    color: var(--paper);
+    background: var(--ink-soft);
+    padding: 0.1em 0.35em;
+  }
+
+  /* ---------- roadmap ---------- */
+
+  .roadmap { border-top: 1px solid var(--ink-line); }
+  .ms {
+    display: grid;
+    grid-template-columns: 3.4rem 1fr auto;
+    gap: 0.6rem 1rem;
+    align-items: baseline;
+    padding-block: 0.85rem;
+    border-bottom: 1px solid var(--ink-line);
+    font-size: 0.98rem;
+  }
+  .ms__id {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--gray);
+  }
+  .ms__name { margin: 0; }
+  .ms__state {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--gray);
+    white-space: nowrap;
+  }
+  .ms--done .ms__id { color: var(--green); }
+  .ms--done .ms__state { color: var(--green); }
+  .ms--next .ms__id { color: var(--orange); }
+  .ms--next .ms__state { color: var(--orange); }
+  .ms--done .ms__name, .ms--next .ms__name { color: var(--paper); }
+  .ms--todo .ms__name { color: var(--gray); }
+
+  /* ---------- honesty ---------- */
+
+  .honesty { display: grid; gap: 2rem; }
+  @media (min-width: 46rem) {
+    .honesty { grid-template-columns: 1fr 1fr; gap: 3rem; }
+  }
+  .honesty h3 {
+    font-family: var(--mono);
+    font-weight: 400;
+    font-size: 0.75rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin: 0 0 1rem;
+    color: var(--gray);
+  }
+  .honesty ul { margin: 0; padding-left: 1.1rem; }
+  .honesty li { margin-bottom: 0.5rem; }
+  .honesty--no li { color: var(--gray); }
+
+  /* ---------- stack ---------- */
+
+  .stack {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+  }
+  .stack span {
+    border: 1px solid var(--ink-line);
+    padding: 0.35rem 0.7rem;
+    color: var(--gray-light);
+  }
+
+  /* ---------- footer ---------- */
+
+  footer {
+    border-top: 1px solid var(--ink-line);
+    padding-block: 2.5rem 3.5rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--gray);
+  }
+  footer p { margin: 0 0 0.6rem; }
+  footer a { color: var(--gray-light); }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar__inner">
+    <a class="wordmark" href="#top"><b>ppagent</b><span> / 开发中</span></a>
+    <span class="status">M1 完成 · 类型契约已定</span>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- HERO -->
+  <div class="wrap hero">
+    <p class="eyebrow">coding agent harness</p>
+    <h1>云端 agent 假设算力无限。<br>本地模型<em>只有一台机器</em>。</h1>
+    <p class="lede">
+      模型推理吃统一内存，agent 执行动作也吃统一内存——它们抢的是同一块。
+      主 agent 正在逐 token 生成时插进来一个子 agent，两者抢同一块 GPU。
+      ppagent 是为这个约束重新设计的 coding agent harness。
+    </p>
+
+    <!-- SIGNATURE -->
+    <div class="meter" aria-label="统一内存占用示意">
+      <div class="meter__head">
+        <strong>统一内存</strong>
+        <span>压力 <span id="pressure">0.32</span></span>
+      </div>
+      <div class="bar" role="img" aria-label="内存分区占用条：模型权重、KV cache、agent 工作区">
+        <div class="seg seg--weights"   id="segWeights"   style="width:44%"></div>
+        <div class="seg seg--kv"        id="segKv"        style="width:8%"></div>
+        <div class="seg seg--workspace" id="segWorkspace" style="width:10%"></div>
+        <div class="seg seg--free"      id="segFree"      style="width:38%"></div>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--blue)"></i>模型权重</span>
+        <span><i style="background:var(--orange)"></i>KV cache</span>
+        <span><i style="background:var(--green)"></i>agent 工作区</span>
+        <span><i style="border:1px solid var(--ink-line)"></i>可用</span>
+      </div>
+      <p class="meter__caption" id="caption" aria-live="polite">
+        对话累积，KV cache 增长。
+      </p>
+    </div>
+
+    <div class="actions">
+      <a class="btn btn--solid" href="https://github.com/fish0710/ppagent">在 GitHub 上查看</a>
+      <a class="btn btn--ghost" href="#roadmap">看进度</a>
+    </div>
+  </div>
+
+  <!-- CLAIM / REALITY -->
+  <section>
+    <div class="wrap">
+      <h2>为什么不能直接拿云端 agent 跑本地模型</h2>
+      <p class="section-note">
+        现有 harness 的每一条默认假设，在一台自己的机器上都不成立。
+      </p>
+
+      <div class="swap">
+        <div class="swap__row">
+          <div class="cell cell--claim">
+            <p class="cell__tag">云端假设</p>
+            <p>上下文没满就继续塞。窗口大小是唯一的约束。</p>
+          </div>
+          <div class="cell cell--real">
+            <p class="cell__tag">本地现实</p>
+            <p>上下文没满，机器已经要 swap 了。内存压力必须和 token 占用一起参与压缩决策。</p>
+          </div>
+        </div>
+        <div class="swap__row">
+          <div class="cell cell--claim">
+            <p class="cell__tag">云端假设</p>
+            <p>需要并行就起子 agent，能起多少起多少。</p>
+          </div>
+          <div class="cell cell--real">
+            <p class="cell__tag">本地现实</p>
+            <p>主 agent 正在 decode，子 agent 的 prefill 插进来抢 GPU，两边一起变慢。起之前得先问问机器答不答应。</p>
+          </div>
+        </div>
+        <div class="swap__row">
+          <div class="cell cell--claim">
+            <p class="cell__tag">云端假设</p>
+            <p>模型足够聪明，提示词里说清楚边界它就不会越界。</p>
+          </div>
+          <div class="cell cell--real">
+            <p class="cell__tag">本地现实</p>
+            <p>参数量小一个量级，误操作概率高一个量级。隔离必须是系统级强制的，不能靠提示词约束。</p>
+          </div>
+        </div>
+        <div class="swap__row">
+          <div class="cell cell--claim">
+            <p class="cell__tag">云端假设</p>
+            <p>系统提示词写详细点，反正窗口够大。</p>
+          </div>
+          <div class="cell cell--real">
+            <p class="cell__tag">本地现实</p>
+            <p>标称 128K，有效上下文远小于此。提示词每多一千 token，可用工作区就少一千。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DECISIONS -->
+  <section>
+    <div class="wrap">
+      <h2>三个设计决定</h2>
+      <p class="section-note">
+        判断标准只有一条：如果一个决定对云端大模型和本地小模型的意义是一样的，那它就不是这个项目的重点，抄现成方案即可。
+      </p>
+
+      <div class="decisions">
+        <div class="decision">
+          <h3>压缩看两个信号</h3>
+          <p>
+            <code>shouldCompact()</code> 同时接收 token 占用和内存压力快照。
+            后者在云端阶段是 <code>undefined</code>，接入本地模型后才生效——
+            接口从第一天就留好，不是事后补。
+          </p>
+        </div>
+        <div class="decision">
+          <h3>子 agent 要准入</h3>
+          <p>
+            <code>spawn_subagent</code> 就是一个普通工具，只是带了
+            <code>requiresAdmission</code> 标志。资源不够时返回明确原因和建议等待时长，
+            让模型自己决定是等还是改成串行。
+          </p>
+        </div>
+        <div class="decision">
+          <h3>摘要策略可插拔</h3>
+          <p>
+            <code>Summarizer</code> 是接口，第一个实现是纯规则裁剪、完全不调模型——
+            本地模型写摘要慢、占 GPU、还会幻觉。哪种更好用真实任务完成率来比，不靠感觉。
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ROADMAP -->
+  <section id="roadmap">
+    <div class="wrap">
+      <h2>进度</h2>
+      <p class="section-note">
+        每个里程碑结束时代码必须能跑，且有一条可执行的验收命令。达不到就不进下一步。
+      </p>
+
+      <div class="roadmap">
+        <div class="ms ms--done"><span class="ms__id">M0</span><p class="ms__name">工程骨架、依赖方向规则、CI</p><span class="ms__state">完成</span></div>
+        <div class="ms ms--done"><span class="ms__id">M1</span><p class="ms__name">类型契约</p><span class="ms__state">完成</span></div>
+        <div class="ms ms--next"><span class="ms__id">M2</span><p class="ms__name">模型调用层与测试用假 provider</p><span class="ms__state">进行中</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M3</span><p class="ms__name">工具注册与执行链</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M4</span><p class="ms__name">agent loop</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M5</span><p class="ms__name">上下文压缩与会话持久化</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M6</span><p class="ms__name">可观测性与取消</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M7</span><p class="ms__name">装配层与人工确认通道</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M8</span><p class="ms__name">命令行入口</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M9</span><p class="ms__name">macOS 沙箱隔离</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M10</span><p class="ms__name">资源探针与准入控制</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--todo"><span class="ms__id">M11</span><p class="ms__name">本地模型接入与对照评测</p><span class="ms__state">待开始</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HONESTY -->
+  <section>
+    <div class="wrap">
+      <h2>现在是什么状态</h2>
+      <p class="section-note">
+        这是一个公开构建中的项目。下面是此刻的真实情况，不是路线图的措辞包装。
+      </p>
+
+      <div class="honesty">
+        <div>
+          <h3>已经有了</h3>
+          <ul>
+            <li>三层架构与单向依赖约束，由 dependency-cruiser 在 CI 强制</li>
+            <li>覆盖模型调用、工具、压缩、沙箱、资源探测、可观测性的完整类型契约</li>
+            <li>每个里程碑的验收命令与桩替换清单</li>
+          </ul>
+        </div>
+        <div class="honesty honesty--no" style="display:block">
+          <h3>还没有</h3>
+          <ul>
+            <li>能跑起来的 agent —— <code>src/</code> 下大部分还是占位</li>
+            <li>任何评测数据</li>
+            <li>可安装的发行版本</li>
+          </ul>
+        </div>
+      </div>
+
+      <p style="margin-top:2.5rem;margin-bottom:1rem;color:var(--gray);font-family:var(--mono);font-size:0.75rem;letter-spacing:0.12em;text-transform:uppercase;">技术栈</p>
+      <div class="stack">
+        <span>TypeScript</span>
+        <span>Node ESM</span>
+        <span>pi-ai</span>
+        <span>vitest</span>
+        <span>dependency-cruiser</span>
+        <span>macOS 沙箱原语</span>
+      </div>
+
+      <div class="actions" style="margin-top:2.5rem">
+        <a class="btn btn--solid" href="https://github.com/fish0710/ppagent">Star 一下，跟进展</a>
+        <a class="btn btn--ghost" href="https://github.com/fish0710/ppagent/issues">提想法</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>ppagent · 独立开源项目，与任何模型厂商无关联。</p>
+    <p><a href="https://github.com/fish0710/ppagent">github.com/fish0710/ppagent</a></p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var segKv = document.getElementById('segKv');
+  var segWorkspace = document.getElementById('segWorkspace');
+  var segFree = document.getElementById('segFree');
+  var pressureEl = document.getElementById('pressure');
+  var captionEl = document.getElementById('caption');
+
+  var WEIGHTS = 44;
+  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var frames = [
+    { kv: 8,  ws: 10, p: 0.32, text: '对话累积，KV cache 增长。' },
+    { kv: 18, ws: 12, p: 0.48, text: '读了几个文件，工具输出进入上下文。' },
+    { kv: 28, ws: 16, p: 0.66, text: 'bash 起了一个构建进程，工作区占用上升。' },
+    { kv: 36, ws: 18, p: 0.79, text: '上下文<b>还没满</b>，但内存压力已越过阈值。' },
+    { kv: 34, ws: 18, p: 0.76, text: '子 agent 请求被拒绝——GPU 忙，建议 10 秒后重试。' },
+    { kv: 12, ws: 14, p: 0.41, text: '压缩触发，历史折叠为摘要。原始记录仍在磁盘上。' }
+  ];
+
+  function apply(f) {
+    segKv.style.width = f.kv + '%';
+    segWorkspace.style.width = f.ws + '%';
+    segFree.style.width = Math.max(0, 100 - WEIGHTS - f.kv - f.ws) + '%';
+    pressureEl.textContent = f.p.toFixed(2);
+    pressureEl.classList.toggle('is-high', f.p >= 0.7);
+    captionEl.innerHTML = f.text;
+  }
+
+  if (reduced) {
+    apply(frames[3]);
+    return;
+  }
+
+  var i = 0;
+  apply(frames[0]);
+
+  var timer = null;
+  function tick() {
+    i = (i + 1) % frames.length;
+    apply(frames[i]);
+  }
+
+  function start() { if (!timer) timer = setInterval(tick, 2600); }
+  function stop() { if (timer) { clearInterval(timer); timer = null; } }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) stop(); else start();
+  });
+  start();
+})();
+</script>
+
+</body>
+</html>
