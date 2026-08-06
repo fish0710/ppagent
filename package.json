@@ -1,0 +1,24 @@
+{
+  "name": "ppagent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fish0710/ppagent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/fish0710/ppagent/issues"
+  },
+  "homepage": "https://github.com/fish0710/ppagent#readme",
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.83.0"
+  }
+}
