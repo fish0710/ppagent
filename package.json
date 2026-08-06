@@ -10,7 +10,7 @@
     "build:bin": "tsc -p tsconfig.bin.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "depcruise": "depcruise src bin --config .dependency-cruiser.cjs"
+    "depcruise": "depcruise src bin test --config .dependency-cruiser.cjs"
   },
   "repository": {
     "type": "git",
@@ -23,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "dependency-cruiser": "^16.7.0",
+    "husky": "^9.1.7",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
   }

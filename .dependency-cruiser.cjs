@@ -32,6 +32,10 @@ module.exports = {
   ],
   options: {
     doNotFollow: { path: 'node_modules' },
+    // 关键：扫 import type。TS 会把类型 import 擦除，默认只看编译后依赖会让
+    // types-is-leaf 和 pi-ai-only-in-adapter 完全失效——而类型泄漏的形态恰恰
+    // 几乎必然是 import type。
+    tsPreCompilationDeps: true,
     tsConfig: { fileName: 'tsconfig.json' },
   },
 };
