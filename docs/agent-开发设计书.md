@@ -166,11 +166,30 @@ export interface UserMessage {
   timestamp: number;
 }
 
+export type JSONValue =
+  | string | number | boolean | null
+  | JSONValue[]
+  | { [key: string]: JSONValue };
+
+export interface ModelOrigin {
+  provider: string;
+  model: string;
+}
+
+export interface AdapterState {
+  adapter: string;
+  data: Record<string, JSONValue>;
+}
+
 export interface AssistantMessage {
   role: 'assistant';
   content: ContentBlock[];
   stopReason: StopReason;
   usage: Usage;
+  /** 明确的模型来源，用于路由、回放和 trace 归因 */
+  origin?: ModelOrigin;
+  /** 适配器专用的不透明状态，core 只持久化和回传 */
+  adapterState?: AdapterState;
   errorMessage?: string;
   timestamp: number;
 }
@@ -186,9 +205,9 @@ export interface ToolResultMessage {
 }
 
 export type ContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'thinking'; thinking: string }
-  | { type: 'toolCall'; id: string; name: string; arguments: unknown }
+  | { type: 'text'; text: string; adapterState?: AdapterState }
+  | { type: 'thinking'; thinking: string; adapterState?: AdapterState }
+  | { type: 'toolCall'; id: string; name: string; arguments: unknown; adapterState?: AdapterState }
   | { type: 'image'; data: string; mimeType: string };
 
 export type StopReason = 'stop' | 'length' | 'toolUse' | 'error' | 'aborted';
@@ -432,11 +451,16 @@ npm run depcruise   # types.ts 的 import 数为 0
 ```bash
 node bin/agent.js --smoke --provider faux      # 打印预设文本
 node bin/agent.js --smoke --provider anthropic # 打印真实模型输出
+node bin/agent.js --smoke --provider openai    # 通过 OPENAI_API_KEY 打印真实模型输出
+node bin/agent.js --smoke --provider custom --model <id> # 通过 OPENAI_BASE_URL + OPENAI_API_KEY 调用私有 OpenAI-compatible 端点
 ```
 
 **要点**
 - `faux.ts` 不是可选项。后面所有 loop 测试都靠它，它必须能构造出真实模型不容易复现的畸形情况。
 - pi-ai 的类型一个字节都不许出现在 `pi-ai.ts` 之外。适配器里做完整转换，宁可多写 50 行映射代码。
+- `toolcall_start` 只表示出现了一个按 `index` 标识的槽位，不要求此时已有 `id` / `name`。适配器聚合后续 chunk，在 `toolcall_end` 才交付完整调用：缺 `id` 时生成本地唯一 ID，缺 `name` 时返回结构化错误。
+- 供应商和模型判断读 `AssistantMessage.origin`；reasoning / tool-call 签名等回放数据放在 `adapterState`，只允许产生它的适配器解释。
+- `--smoke` 默认隐藏 `thinking_delta`，stdout 只打印最终文本流；底层事件仍完整保留，由后续 TUI / trace 决定是否展示。
 
 ---
 

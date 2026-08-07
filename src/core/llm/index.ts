@@ -1,1 +1,9 @@
-// 占位（对应 M2 落地）
+export * from './provider.js';
+export * from './faux.js';
+export {
+  createPiAiProvider,
+  type PiAiBuiltinProvider,
+  type PiAiCustomModelOptions,
+  type PiAiCustomProviderOptions,
+  type PiAiProviderOptions,
+} from './pi-ai.js';

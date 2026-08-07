@@ -46,6 +46,23 @@ export type ToolCallId = string;
 /** 毫秒时间戳。统一用 number，便于 JSON 序列化与跨进程传递。 */
 export type Millis = number;
 
+/** 模型响应的明确来源。供应商判断必须读这里，不依赖适配器私有数据。 */
+export interface ModelOrigin {
+  provider: string;
+  model: string;
+}
+
+/**
+ * 适配器为多轮回放保存的不透明状态。
+ *
+ * core 只负责随消息持久化和回传，不解释 data。只有 adapter 字段指向的
+ * 适配器可以读取其中内容，例如 pi-ai 的 reasoning/tool-call 签名。
+ */
+export interface AdapterState {
+  adapter: string;
+  data: Record<string, JSONValue>;
+}
+
 // ============================================================================
 // 1. 消息与内容块
 //
@@ -71,8 +88,10 @@ export interface AssistantMessage {
   content: ContentBlock[];
   stopReason: StopReason;
   usage: Usage;
-  /** 产生这条消息的模型，用于 trace 归因与成本核算 */
-  model?: string;
+  /** 产生这条消息的供应商和模型，用于路由、回放、trace 与成本归因 */
+  origin?: ModelOrigin;
+  /** 消息级适配器私有状态，core 不解释 */
+  adapterState?: AdapterState;
   /** stopReason 为 'error' 时的原因描述 */
   errorMessage?: string;
   timestamp: Millis;
@@ -106,11 +125,13 @@ export type ContentBlock =
 export interface TextBlock {
   type: 'text';
   text: string;
+  adapterState?: AdapterState;
 }
 
 export interface ThinkingBlock {
   type: 'thinking';
   thinking: string;
+  adapterState?: AdapterState;
 }
 
 /**
@@ -129,6 +150,7 @@ export interface ToolCallBlock {
   name: string;
   /** 未经校验的原始参数。执行前必须过 JSONSchema 校验。 */
   arguments: unknown;
+  adapterState?: AdapterState;
 }
 
 export interface ImageBlock {
@@ -213,7 +235,8 @@ export type StreamEvent =
   | { type: 'start' }
   | { type: 'text_delta'; delta: string }
   | { type: 'thinking_delta'; delta: string }
-  | { type: 'toolcall_start'; index: number; id: ToolCallId; name: string }
+  /** 这里只声明槽位出现；完整 id/name/arguments 由 toolcall_end 保证。 */
+  | { type: 'toolcall_start'; index: number }
   /** 参数 JSON 会被切碎跨 chunk 到达，需要增量拼接 */
   | { type: 'toolcall_delta'; index: number; delta: string }
   | { type: 'toolcall_end'; index: number; call: ToolCallBlock }
