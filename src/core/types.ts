@@ -208,8 +208,7 @@ export interface ModelRef {
   /**
    * 是否支持原生 tool calling。
    *
-   * 为 false 时走 prompted 降级路径：工具定义渲染进 system prompt，
-   * 从文本流里增量抽取调用。Gemma 系属于这种。
+   * PPAgent 只支持该值为 true 的模型，不提供纯文本模拟工具调用的降级路径。
    */
   supportsNativeToolCalling: boolean;
   supportsThinking: boolean;

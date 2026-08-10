@@ -1,5 +1,6 @@
 node_modules
 dist
 bin/agent.js
+bin/smoke-env.js
 bin/agent.js.map
 *.tsbuildinfo

@@ -305,6 +305,40 @@ describe('pi-ai adapter', () => {
       },
     });
   });
+
+  it('adds an actionable and redacted hint to custom connection errors', async () => {
+    mock.events = [
+      {
+        type: 'error',
+        reason: 'error',
+        error: {
+          ...piMessage([]),
+          stopReason: 'error',
+          errorMessage: 'Connection error.',
+        },
+      },
+    ];
+    const provider = createPiAiProvider({
+      providers: [],
+      customProviders: [
+        {
+          id: 'custom',
+          baseUrl: 'http://user:secret@localhost:11434',
+          models: [{ id: 'local-model' }],
+        },
+      ],
+    });
+
+    const events = await collect(provider);
+
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      message: {
+        errorMessage:
+          'Connection error. Custom provider base URL: http://localhost:11434. LM Studio and llama.cpp API roots usually end in /v1.',
+      },
+    });
+  });
 });
 
 function piMessage(content: unknown[]) {

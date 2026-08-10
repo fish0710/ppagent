@@ -59,6 +59,7 @@ class PiAiProvider implements Provider {
   readonly #models;
   readonly #apiKeys: Readonly<Record<string, string>>;
   readonly #idFactory: () => string;
+  readonly #customBaseUrls = new Map<string, string>();
 
   constructor(options: PiAiProviderOptions) {
     this.#models = createModels({
@@ -73,6 +74,7 @@ class PiAiProvider implements Provider {
     }
     for (const provider of options.customProviders ?? []) {
       this.#models.setProvider(createCustomProvider(provider));
+      this.#customBaseUrls.set(provider.id, normalizeBaseUrl(provider.baseUrl));
     }
     this.#apiKeys = options.apiKeys ?? {};
     this.#idFactory = options.idFactory ?? defaultToolCallId;
@@ -96,6 +98,7 @@ class PiAiProvider implements Provider {
     }
 
     const generatedIds = new Map<number, string>();
+    const customBaseUrl = this.#customBaseUrls.get(requested.provider);
     let terminal = false;
     try {
       const piContext = toPiContext(context, model, this.#models);
@@ -110,7 +113,11 @@ class PiAiProvider implements Provider {
       });
 
       for await (const event of stream) {
-        const mapped = mapStreamEvent(event, generatedIds, this.#idFactory);
+        const rawMapped = mapStreamEvent(event, generatedIds, this.#idFactory);
+        const mapped =
+          rawMapped === null || customBaseUrl === undefined
+            ? rawMapped
+            : withCustomConnectionHintOnEvent(rawMapped, customBaseUrl);
         if (mapped !== null) yield mapped;
         if (mapped?.type === 'done' || mapped?.type === 'error') {
           terminal = true;
@@ -125,7 +132,14 @@ class PiAiProvider implements Provider {
       }
     } catch (error) {
       const reason = options.signal?.aborted === true ? 'aborted' : 'error';
-      yield adapterError(errorMessage(error), requested, reason);
+      const message = errorMessage(error);
+      yield adapterError(
+        customBaseUrl === undefined
+          ? message
+          : withCustomConnectionHint(message, customBaseUrl),
+        requested,
+        reason,
+      );
     }
   }
 }
@@ -170,10 +184,19 @@ function createCustomProvider(options: PiAiCustomProviderOptions) {
     auth: {
       apiKey: {
         name: `${options.id} API key`,
-        resolve: async ({ credential }) =>
-          credential?.key === undefined
-            ? undefined
-            : { auth: { apiKey: credential.key } },
+        resolve: async ({ credential }) => {
+          const apiKey = credential?.key?.trim();
+          return apiKey === undefined || apiKey.length === 0
+            ? {
+                // pi-ai 需要一个非空 apiKey 才会把 provider 视为已配置；
+                // Authorization: null 会让 OpenAI SDK 在发请求前移除占位头。
+                auth: {
+                  apiKey: 'ppagent-no-auth',
+                  headers: { authorization: null },
+                },
+              }
+            : { auth: { apiKey } };
+        },
       },
     },
     models,
@@ -557,4 +580,43 @@ function defaultToolCallId(): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function withCustomConnectionHint(message: string, baseUrl: string): string {
+  if (!isConnectionFailure(message)) return message;
+  return `${message} Custom provider base URL: ${redactBaseUrl(baseUrl)}. LM Studio and llama.cpp API roots usually end in /v1.`;
+}
+
+function withCustomConnectionHintOnEvent(
+  event: StreamEvent,
+  baseUrl: string,
+): StreamEvent {
+  if (event.type !== 'error' || event.message.errorMessage === undefined) {
+    return event;
+  }
+  return {
+    ...event,
+    message: {
+      ...event.message,
+      errorMessage: withCustomConnectionHint(
+        event.message.errorMessage,
+        baseUrl,
+      ),
+    },
+  };
+}
+
+function isConnectionFailure(message: string): boolean {
+  return /connection error|fetch failed|econnrefused|enotfound|network error/iu.test(
+    message,
+  );
+}
+
+function redactBaseUrl(value: string): string {
+  const url = new URL(value);
+  url.username = '';
+  url.password = '';
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/+$/u, '');
 }

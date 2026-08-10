@@ -23,7 +23,7 @@
 
 ## 1. 项目定位
 
-**一句话**：专门为本地部署模型（Qwen3.6 / Gemma4 这类跑在 Mac 上的模型）设计的 coding agent harness。
+**一句话**：专门为支持原生 tool calling 的本地部署模型（如跑在 Mac 上的 Qwen3.6）设计的 coding agent harness。
 
 与 Claude Code / pi 的差异点，也是本项目全部的存在理由：
 
@@ -119,7 +119,6 @@ src/
     tools/
       registry.ts            # 注册与查找
       execute.ts             # 执行链：准入 → 权限 → 沙箱 → 截断
-      prompted.ts            # 无原生工具调用时的降级解析
       builtin/
         read.ts  write.ts  edit.ts  bash.ts  spawn-subagent.ts
     sandbox/
@@ -231,7 +230,7 @@ export interface ModelRef {
   provider: string;
   id: string;
   contextWindow: number;
-  supportsNativeToolCalling: boolean;   // Gemma 系为 false，走 prompted 降级
+  supportsNativeToolCalling: boolean;   // PPAgent 仅支持 true
   reasoning: boolean;
 }
 
@@ -452,8 +451,14 @@ npm run depcruise   # types.ts 的 import 数为 0
 node bin/agent.js --smoke --provider faux      # 打印预设文本
 node bin/agent.js --smoke --provider anthropic # 打印真实模型输出
 node bin/agent.js --smoke --provider openai    # 通过 OPENAI_API_KEY 打印真实模型输出
-node bin/agent.js --smoke --provider custom --model <id> # 通过 OPENAI_BASE_URL + OPENAI_API_KEY 调用私有 OpenAI-compatible 端点
+PPAGENT_CUSTOM_BASE_URL=http://localhost:11434/v1 \
+  node bin/agent.js --smoke --provider custom --model <id> # API key 可选
 ```
+
+custom provider 只读取 `PPAGENT_CUSTOM_BASE_URL` 和可选的
+`PPAGENT_CUSTOM_API_KEY`，不复用 OpenAI provider 的环境变量。base URL 必须是完整的
+OpenAI-compatible API 根地址；LM Studio 和 llama.cpp 通常需要以 `/v1` 结尾，程序不会
+擅自补路径。custom 模型必须支持原生 tool calling。
 
 **要点**
 - `faux.ts` 不是可选项。后面所有 loop 测试都靠它，它必须能构造出真实模型不容易复现的畸形情况。
@@ -717,12 +722,8 @@ node bin/agent.js "并行分析这十个模块"
 **目标**：换成本地模型跑通，并与 pi 做对照。
 
 **交付**
-- `core/llm/pi-ai.ts` 增加本地 provider 注册（LM Studio / llama.cpp，见附录 A）
-- `core/tools/prompted.ts` —— 无原生工具调用的降级路径：
-  - 工具定义渲染进 system prompt（格式要极简，本地模型上下文金贵）
-  - 从文本流里增量抽取工具调用
-  - 解析失败时把错误返回给模型重试
-  - `ModelRef.supportsNativeToolCalling` 为 false 时自动启用
+- `core/llm/pi-ai.ts` 完成本地 provider 注册与兼容性验证（LM Studio / llama.cpp，见附录 A）
+- 仅接入具备 OpenAI-compatible 原生 tool calling 能力的模型；不支持的模型不进入 PPAgent 模型清单
 - `core/telemetry/` 增加 Laminar exporter
 - Harbor 适配器，跑 Terminal-Bench
 
@@ -747,7 +748,7 @@ node bin/agent.js --provider lmstudio --model qwen3.6-27b "在这个仓库里加
 | `PermissionPolicy` | M3 | 永远 `allow` | 触发 `Interaction` | M7 |
 | `SpanExporter` | M6 | 打到 stderr | Laminar | M11 |
 | `CompactPolicy` 的 resource 输入 | M5 | `undefined` | 接入探针快照 | M10 |
-| 工具调用形态 | M3 | 仅原生 tool calling | 增加 prompted 降级 | M11 |
+| 工具调用形态 | M3 | 仅原生 tool calling | 验证本地服务的原生 tool calling 兼容性 | M11 |
 | `Interaction` | M1 | CLI 自动拒绝 | TUI 弹窗 | M7 / M8 |
 
 **桩的两条纪律**
@@ -786,11 +787,12 @@ node bin/agent.js --provider lmstudio --model qwen3.6-27b "在这个仓库里加
 | 探针采样有性能成本 | 每次工具调用都探测会拖慢循环 | 加 2 秒缓存 |
 | loop 会变胖 | 组件互不认识意味着搬运责任全在 loop | 接受。搬运逻辑单独抽函数，但不引入新的中间层 |
 | pi-ai 是外部依赖 | 上游 API 变更风险（近期刚换过 npm scope） | 适配器隔离；真出问题时自己写 OpenAI 兼容客户端约 300–500 行 |
-| 本地模型工具调用形态碎片化 | Qwen3 走 Hermes 风格原生字段，Gemma 系无原生能力 | `supportsNativeToolCalling` 标志 + prompted 降级路径 |
+| 本地模型工具调用形态碎片化 | 不同服务对 OpenAI tool calling 字段的实现并不完全一致 | 只支持通过兼容性验证的原生 tool calling 模型；纯文本模拟工具调用不在范围内 |
 
 **明确不做的事**
 
 - 不做多 provider 抽象层。目标是本地模型，出口都是 OpenAI 兼容的 `/chat/completions`，只有一个协议要对接，付不起框架的抽象税。
+- 不做 prompted tool calling 降级。不能通过 OpenAI-compatible 原生字段调用工具的模型不在 PPAgent 支持范围内。
 - 骨架期不碰 `cache_prompt` / `n_keep` 这类 llama.cpp、MLX server 的非标准参数。云端 API 根本不透出这些，现在调是白调，留到 M11。
 - 不做 plan mode、不做复杂的 subagent 编排。系统提示词要小，功能越多提示词越长。
 
@@ -808,7 +810,18 @@ const local = createProvider({
   id: 'local',
   name: 'Local',
   baseUrl: BASE,
-  auth: { apiKey: { name: 'Local', resolve: async () => ({ auth: {} }) } },
+  auth: {
+    apiKey: {
+      name: 'Local',
+      resolve: async () => ({
+        // pi-ai 用非空 apiKey 表示 provider 已配置；null 会让 SDK 移除认证头。
+        auth: {
+          apiKey: 'ppagent-no-auth',
+          headers: { authorization: null },
+        },
+      }),
+    },
+  },
   models: [{
     id: 'qwen3.6-27b',
     name: 'Qwen3.6 27B',
@@ -829,6 +842,10 @@ const local = createProvider({
 const models = createModels();
 models.setProvider(local);
 ```
+
+`BASE` 是完整的 OpenAI-compatible API 根地址，程序不会自动追加 `/v1`。本地服务没有
+认证时不需要 API key；启用认证时由上层通过独立的 `PPAGENT_CUSTOM_API_KEY` 注入。
+模型还必须支持原生 tool calling，否则不属于 PPAgent 的支持范围。
 
 模型 ID 必须与服务端返回一致：
 
@@ -853,6 +870,6 @@ curl http://localhost:1234/v1/models | jq '.data[].id'
 | M8 | CLI | print / JSON 模式 | 可被脚本批量调用 |
 | M9 | 沙箱 | sandbox-exec | 越界被拦截 |
 | M10 | 探针与准入 | 卖点落地 | 资源不足时拒绝 subagent |
-| M11 | 本地模型 | prompted 降级 + 评测 | Terminal-Bench 对照跑通 |
+| M11 | 本地模型 | 原生 tool calling 兼容性验证 + 评测 | Terminal-Bench 对照跑通 |
 
 TUI 不在关键路径上，M8 之后任意时间插入。

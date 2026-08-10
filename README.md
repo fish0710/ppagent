@@ -28,6 +28,22 @@ npm run depcruise
 npm test
 ```
 
+### 验证本地 OpenAI-compatible 服务
+
+`PPAGENT_CUSTOM_BASE_URL` 必须是完整的 API 根地址；LM Studio 和
+llama.cpp 通常需要以 `/v1` 结尾。没有认证的本地服务不需要设置 API key：
+
+```bash
+PPAGENT_CUSTOM_BASE_URL=http://localhost:11434/v1 \
+  node bin/agent.js --smoke --provider custom --model <model-id>
+```
+
+只有服务端启用了认证时才设置 `PPAGENT_CUSTOM_API_KEY`。custom provider 不会读取
+`OPENAI_API_KEY`，避免把真实 OpenAI key 发送给本地服务。
+
+PPAgent 只支持具备 OpenAI-compatible 原生 tool calling 能力的模型，不提供把工具调用
+编码进普通文本的 prompted 降级路径。
+
 ## 设计文档
 
 - [Agent 开发设计书](docs/agent-%E5%BC%80%E5%8F%91%E8%AE%BE%E8%AE%A1%E4%B9%A6.md)

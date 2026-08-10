@@ -11,6 +11,7 @@ import {
   type ModelRef,
   type Provider,
 } from '../dist/core/llm/index.js';
+import { readCustomSmokeEnvironment } from './smoke-env.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(
@@ -31,6 +32,10 @@ function printHelp(): void {
   process.stdout.write(`Usage:
   agent --version
   agent --smoke [--provider faux|anthropic|openai|custom] [--model MODEL] [PROMPT]
+
+Custom provider environment:
+  PPAGENT_CUSTOM_BASE_URL  OpenAI-compatible API root, usually ending in /v1
+  PPAGENT_CUSTOM_API_KEY   Optional; omit it for services without authentication
 `);
 }
 
@@ -182,14 +187,7 @@ function createSmokeProvider(args: SmokeArgs): {
     if (args.model === undefined) {
       throw new Error('--model is required for the custom smoke test');
     }
-    const baseUrl = process.env['OPENAI_BASE_URL'];
-    if (baseUrl === undefined || baseUrl.trim().length === 0) {
-      throw new Error('OPENAI_BASE_URL is required for the custom smoke test');
-    }
-    const apiKey = process.env['OPENAI_API_KEY'];
-    if (apiKey === undefined || apiKey.trim().length === 0) {
-      throw new Error('OPENAI_API_KEY is required for the custom smoke test');
-    }
+    const { baseUrl, apiKey } = readCustomSmokeEnvironment(process.env);
     const provider = createPiAiProvider({
       providers: [],
       customProviders: [
@@ -199,7 +197,7 @@ function createSmokeProvider(args: SmokeArgs): {
           models: [{ id: args.model }],
         },
       ],
-      apiKeys: { custom: apiKey },
+      ...(apiKey === undefined ? {} : { apiKeys: { custom: apiKey } }),
     });
     return {
       provider,
