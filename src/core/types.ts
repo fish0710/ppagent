@@ -206,11 +206,13 @@ export interface ModelRef {
   contextWindow: number;
   maxOutputTokens: number;
   /**
-   * 是否支持原生 tool calling。
+   * 原生 tool calling 支持断言。
    *
-   * PPAgent 只支持该值为 true 的模型，不提供纯文本模拟工具调用的降级路径。
+   * 字面量 true 让 Provider 无法登记一个已知不支持原生工具调用的模型。
+   * custom endpoint 的真实能力仍取决于服务端 chat template；M4 在可识别的
+   * 文本化工具调用出现时给出诊断，M11 做 endpoint/model/template 兼容性验证。
    */
-  supportsNativeToolCalling: boolean;
+  supportsNativeToolCalling: true;
   supportsThinking: boolean;
   /** 兼容性开关。本地 OpenAI 兼容服务常有各自的缺失。 */
   compat?: ModelCompat;

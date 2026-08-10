@@ -230,7 +230,7 @@ export interface ModelRef {
   provider: string;
   id: string;
   contextWindow: number;
-  supportsNativeToolCalling: boolean;   // PPAgent 仅支持 true
+  supportsNativeToolCalling: true;      // Provider 对原生工具调用能力的断言
   reasoning: boolean;
 }
 
@@ -458,7 +458,8 @@ PPAGENT_CUSTOM_BASE_URL=http://localhost:11434/v1 \
 custom provider 只读取 `PPAGENT_CUSTOM_BASE_URL` 和可选的
 `PPAGENT_CUSTOM_API_KEY`，不复用 OpenAI provider 的环境变量。base URL 必须是完整的
 OpenAI-compatible API 根地址；LM Studio 和 llama.cpp 通常需要以 `/v1` 结尾，程序不会
-擅自补路径。custom 模型必须支持原生 tool calling。
+擅自补路径。custom 模型必须支持原生 tool calling；M2 把该配置视为调用方断言，M4
+增加保守的错误诊断，M11 再验证具体 endpoint/model/chat-template 组合。
 
 **要点**
 - `faux.ts` 不是可选项。后面所有 loop 测试都靠它，它必须能构造出真实模型不容易复现的畸形情况。
@@ -543,6 +544,8 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 **要点**
 - 流式工具参数的增量拼接（partial JSON，参数 JSON 被切碎跨 chunk 到达）是这一步最容易出 bug 的地方。用 `faux.ts` 构造出"参数被切成 20 段"的情况专门测。
 - 循环终止条件要显式：`stopReason === 'stop'`、超过最大轮数、用户取消。三者都要有对应的 UIEvent。
+- 当本轮提供了工具、模型却以普通文本结束时，不能仅凭 `stopReason === 'stop'` 判定模型不支持工具调用；模型可能只是认为不需要工具。只有正文命中已知文本化工具封装（如 `<tool_call>`），或顶层 JSON 的 `name` 命中本轮已注册工具且带有 `arguments` 时，才返回明确的配置错误：该 endpoint/model/chat-template 组合可能不支持原生工具调用，PPAgent 不支持这种模式。
+- 上述检查是保守诊断，不是完整的能力探测。用 `faux.ts` 同时覆盖“文本化工具调用被拦截”和“正常正文包含 JSON 但不误报”。真正的兼容性验证留在 M11。
 
 ---
 
@@ -719,10 +722,10 @@ node bin/agent.js "并行分析这十个模块"
 
 ### M11 · 本地模型接入与对照评测
 
-**目标**：换成本地模型跑通，并与 pi 做对照。
+**目标**：换成本地模型跑通，验证具体 endpoint/model/chat-template 组合的原生工具调用兼容性，并与 pi 做对照。
 
 **交付**
-- `core/llm/pi-ai.ts` 完成本地 provider 注册与兼容性验证（LM Studio / llama.cpp，见附录 A）
+- `core/llm/pi-ai.ts` 完成本地 provider 注册与兼容性验证（LM Studio / llama.cpp，见附录 A）；服务端模型或 chat template 变化后重新验证
 - 仅接入具备 OpenAI-compatible 原生 tool calling 能力的模型；不支持的模型不进入 PPAgent 模型清单
 - `core/telemetry/` 增加 Laminar exporter
 - Harbor 适配器，跑 Terminal-Bench

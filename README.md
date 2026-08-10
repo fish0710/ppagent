@@ -42,7 +42,9 @@ PPAGENT_CUSTOM_BASE_URL=http://localhost:11434/v1 \
 `OPENAI_API_KEY`，避免把真实 OpenAI key 发送给本地服务。
 
 PPAgent 只支持具备 OpenAI-compatible 原生 tool calling 能力的模型，不提供把工具调用
-编码进普通文本的 prompted 降级路径。
+编码进普通文本的 prompted 降级路径。这个能力也取决于服务端使用的 chat template；
+配置 custom endpoint 即表示它满足该前提。M4 会对可识别的文本化工具调用给出明确诊断，
+M11 再按 endpoint、model 和 chat template 做兼容性验证。
 
 ## 设计文档
 
