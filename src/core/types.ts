@@ -293,8 +293,21 @@ export interface ToolDef {
 }
 
 export interface Tool extends ToolDef {
+  /**
+   * 在真正执行前应用沙箱策略，并可把参数转换为沙箱准备后的内部形态。
+   * read/write/edit 在这里检查绝对路径；bash 在这里取得包装后的命令。
+   */
+  prepareSandbox(
+    args: unknown,
+    ctx: ToolContext,
+    sandbox: Sandbox,
+  ): ToolSandboxPreparation;
   execute(args: unknown, ctx: ToolContext): Promise<ToolOutput>;
 }
+
+export type ToolSandboxPreparation =
+  | { allowed: true; args: unknown }
+  | { allowed: false; reason: string; escalatable: boolean };
 
 export interface ToolContext {
   signal: AbortSignal;
@@ -307,6 +320,8 @@ export interface ToolContext {
 export interface ToolOutput {
   content: ContentBlock[];
   isError: boolean;
+  /** 执行器裁剪过结果时置 true，后续必须透传到 ToolResultMessage。 */
+  truncated?: boolean;
   /**
    * 工具自报的资源占用，喂给 compact 决策。
    * 例如 bash 起了一个常驻服务，内存压力会上升。

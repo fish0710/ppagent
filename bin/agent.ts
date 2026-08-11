@@ -11,6 +11,18 @@ import {
   type ModelRef,
   type Provider,
 } from '../dist/core/llm/index.js';
+import { StubAdmissionController } from '../dist/agent/admission/index.js';
+import { StubPermissionPolicy } from '../dist/agent/permissions/index.js';
+import { PassthroughSandbox } from '../dist/core/sandbox/index.js';
+import {
+  createBuiltinToolRegistry,
+  executeToolCall,
+} from '../dist/core/tools/index.js';
+import type {
+  Interaction,
+  ToolContext,
+  TraceContext,
+} from '../dist/core/types.js';
 import { readCustomSmokeEnvironment } from './smoke-env.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -24,6 +36,11 @@ interface SmokeArgs {
   prompt: string;
 }
 
+interface ToolArgs {
+  name: string;
+  arguments: unknown;
+}
+
 function printVersion(): void {
   process.stdout.write(`${pkg.name} ${pkg.version}\n`);
 }
@@ -32,6 +49,7 @@ function printHelp(): void {
   process.stdout.write(`Usage:
   agent --version
   agent --smoke [--provider faux|anthropic|openai|custom] [--model MODEL] [PROMPT]
+  agent --tool read|write|edit|bash [--args JSON]
 
 Custom provider environment:
   PPAGENT_CUSTOM_BASE_URL  OpenAI-compatible API root, usually ending in /v1
@@ -47,6 +65,10 @@ async function main(): Promise<void> {
   }
   if (args.includes('--help') || args.includes('-h')) {
     printHelp();
+    return;
+  }
+  if (args.includes('--tool')) {
+    await runTool(parseToolArgs(args));
     return;
   }
   if (!args.includes('--smoke')) {
@@ -101,6 +123,34 @@ async function main(): Promise<void> {
   }
 }
 
+async function runTool(args: ToolArgs): Promise<void> {
+  const controller = new AbortController();
+  const context: ToolContext = {
+    signal: controller.signal,
+    cwd: process.cwd(),
+    trace: rootTrace(),
+    interaction: nonInteractiveInteraction(),
+  };
+  const result = await executeToolCall(
+    createBuiltinToolRegistry(),
+    {
+      type: 'toolCall',
+      id: 'cli-tool-call',
+      name: args.name,
+      arguments: args.arguments,
+    },
+    context,
+    {
+      admission: new StubAdmissionController(),
+      permissions: new StubPermissionPolicy(),
+      sandbox: new PassthroughSandbox(),
+    },
+    { maxResultChars: 8_000, toolTimeoutMs: 30_000 },
+  );
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (result.isError) process.exitCode = 1;
+}
+
 function parseSmokeArgs(args: string[]): SmokeArgs {
   let provider = 'faux';
   let model: string | undefined;
@@ -127,6 +177,27 @@ function parseSmokeArgs(args: string[]): SmokeArgs {
     prompt:
       promptParts.join(' ').trim() || 'Reply with exactly: M2 smoke OK',
   };
+}
+
+function parseToolArgs(args: string[]): ToolArgs {
+  let name: string | undefined;
+  let rawArguments = '{}';
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--tool' || arg === '--args') {
+      const value = args[index + 1];
+      if (value === undefined) throw new Error(`${arg} requires a value`);
+      if (arg === '--tool') name = value;
+      else rawArguments = value;
+      index += 1;
+      continue;
+    }
+    if (arg !== undefined) throw new Error(`Unknown tool option: ${arg}`);
+  }
+  if (name === undefined || name.trim().length === 0) {
+    throw new Error('--tool requires a value');
+  }
+  return { name, arguments: parseOrKeepRaw(rawArguments) };
 }
 
 function createSmokeProvider(args: SmokeArgs): {
@@ -212,6 +283,42 @@ function selectModel(provider: Provider, providerId: string, id: string): ModelR
   const model = findModel(provider.listModels(), providerId, id);
   if (model === undefined) throw new Error(`Unknown model: ${providerId}/${id}`);
   return model;
+}
+
+function parseOrKeepRaw(raw: string): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
+function rootTrace(): TraceContext {
+  const traceId = crypto.randomUUID();
+  const spanId = crypto.randomUUID();
+  return {
+    traceId,
+    spanId,
+    child(name) {
+      return {
+        traceId,
+        spanId: `${name}-${crypto.randomUUID()}`,
+        parentSpanId: this.spanId,
+        child: this.child,
+      };
+    },
+  };
+}
+
+function nonInteractiveInteraction(): Interaction {
+  return {
+    confirm: async () => false,
+    ask: async () => null,
+    select: async () => null,
+    notify: ({ level, message }) => {
+      process.stderr.write(`[${level}] ${message}\n`);
+    },
+  };
 }
 
 void main().catch((error: unknown) => {

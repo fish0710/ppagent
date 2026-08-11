@@ -118,6 +118,7 @@ src/
       compact.ts             # 压缩策略（多输入触发）
     tools/
       registry.ts            # 注册与查找
+      validate.ts            # JSON Schema 参数校验
       execute.ts             # 执行链：准入 → 权限 → 沙箱 → 截断
       builtin/
         read.ts  write.ts  edit.ts  bash.ts  spawn-subagent.ts
@@ -267,6 +268,8 @@ export interface ToolDef {
   privileged?: boolean;
   /** 该工具是否需要资源准入检查（subagent 用） */
   requiresAdmission?: boolean;
+  /** 是否可与其他工具并发执行 */
+  concurrencySafe?: boolean;
 }
 
 export interface ToolContext {
@@ -277,12 +280,16 @@ export interface ToolContext {
 }
 
 export interface Tool extends ToolDef {
+  prepareSandbox(args: unknown, ctx: ToolContext, sandbox: Sandbox):
+    | { allowed: true; args: unknown }
+    | { allowed: false; reason: string; escalatable: boolean };
   execute(args: unknown, ctx: ToolContext): Promise<ToolOutput>;
 }
 
 export interface ToolOutput {
   content: ContentBlock[];
   isError: boolean;
+  truncated?: boolean;
   /** 工具自己上报的资源占用，用于 compact 决策 */
   resourceHint?: { spawnedProcesses?: number; memMB?: number };
 }
@@ -472,10 +479,11 @@ OpenAI-compatible API 根地址；LM Studio 和 llama.cpp 通常需要以 `/v1` 
 
 ### M3 · 工具层
 
-**目标**：能注册工具、校验参数、执行、截断结果。执行链的所有关卡先全部放行。
+**目标**：能注册工具、校验参数、执行、截断结果。admission → permissions → sandbox → 截断四个关卡一次搭全，默认放行但桩的结果可配置。
 
 **交付**
 - `core/tools/registry.ts` —— 注册、查找、生成工具定义的 JSON Schema
+- `core/tools/validate.ts` —— 不依赖第三方 schema 库的 JSON Schema 子集校验
 - `core/tools/execute.ts` —— 执行链骨架：
 
   ```ts
@@ -483,16 +491,19 @@ OpenAI-compatible API 根地址；LM Studio 和 llama.cpp 通常需要以 `/v1` 
     tool: Tool, args: unknown, ctx: ToolContext,
     deps: { admission: AdmissionController; permissions: PermissionPolicy; sandbox: Sandbox }
   ): Promise<ToolOutput> {
+    const validated = validate(tool.parameters, args);
+    if (!validated.ok) return truncate(errorOutput(validated.errors));
     if (tool.requiresAdmission) {
       const d = await deps.admission.canSpawnSubagent();
-      if (!d.ok) return errorOutput(`资源不足：${d.reason}`);
+      if (!d.ok) return truncate(errorOutput(`资源不足：${d.reason}`));
     }
     if (tool.privileged) {
-      const p = await deps.permissions.check({ toolName: tool.name, summary: describe(args) }, ctx.interaction);
-      if (p === 'deny') return errorOutput('用户拒绝执行');
+      const p = await deps.permissions.check({ toolName: tool.name, summary: describe(validated.value) }, ctx.interaction);
+      if (p === 'deny') return truncate(errorOutput('用户拒绝执行'));
     }
-    const validated = validate(tool.parameters, args);   // 失败要返回给模型让它重试，不是抛异常
-    const raw = await deps.sandbox.run(() => tool.execute(validated, ctx), tool);
+    const prepared = tool.prepareSandbox(validated.value, ctx, deps.sandbox);
+    if (!prepared.allowed) return truncate(sandboxError(prepared));
+    const raw = await runWithTimeout(() => tool.execute(prepared.args, ctx));
     return truncate(raw);
   }
   ```
@@ -503,18 +514,23 @@ OpenAI-compatible API 根地址；LM Studio 和 llama.cpp 通常需要以 `/v1` 
 **桩**
 | 接口 | 桩实现 |
 |---|---|
-| `AdmissionController` | 永远 `{ ok: true }` |
-| `PermissionPolicy` | 永远 `'allow'` |
-| `Sandbox` | `passthrough`，直接执行 |
+| `AdmissionController` | 默认 `{ ok: true }`；构造参数和 `setDecision` 可切成拒绝 |
+| `PermissionPolicy` | 默认 `'allow'`；构造参数和 `setDecision` 可切成拒绝 |
+| `Sandbox` | `passthrough` 默认放行；可注入路径决策与命令包装函数 |
 
 **验收**
 ```bash
 node bin/agent.js --tool read --args '{"path":"package.json"}'
 node bin/agent.js --tool bash --args '{"cmd":"yes | head -100000"}'   # 结果被截断，且 truncated=true
 node bin/agent.js --tool read --args '{"path":123}'                   # 返回参数校验错误，不崩溃
+node bin/agent.js --tool read --args '{"path":'                       # raw string 同样返回 isError=true
 ```
 
-**要点**：参数校验失败必须作为工具结果返回给模型（`isError: true`），让它自己重试。抛异常中断整个 turn 是错的——本地小模型生成畸形参数的频率很高，这是常态而非异常。
+**要点**：
+- 参数校验失败必须作为工具结果返回给模型（`isError: true`），让它自己重试。抛异常中断整个 turn 是错的——本地小模型生成畸形参数的频率很高，这是常态而非异常。
+- M2 的 `parseOrKeepRaw` 会把畸形 JSON 保留为 string；M3 必须让该 string 进入 schema 校验并返回工具错误，不能在边界处重新 `JSON.parse` 后抛异常。
+- 截断保留头尾，中间写入 `[... N 行已省略 ...]`，并在 `ToolOutput` 与 `ToolResultMessage` 上透传 `truncated: true`。
+- `Sandbox` 的真实契约不是伪码里的 `run(fn)`：进程内文件工具通过 `checkPath` 事前检查，bash 通过 `wrapCommand` 取得受控命令。`Tool.prepareSandbox` 把这一步纳入统一执行链。
 
 ---
 
@@ -745,10 +761,10 @@ node bin/agent.js --provider lmstudio --model qwen3.6-27b "在这个仓库里加
 | 接口 | 定义于 | 桩实现 | 真实实现 | 替换时机 |
 |---|---|---|---|---|
 | `Provider` | M1 | `faux.ts` | `pi-ai.ts` | M2 同时存在 |
-| `AdmissionController` | M1 | 永远 `{ ok: true }` | 读探针判断 | M10 |
+| `AdmissionController` | M1 | 默认 `{ ok: true }`，可配置拒绝 | 读探针判断 | M10 |
 | `ResourceProbe` | M1 | 返回固定值 | `vm_stat` / `powermetrics` | M10 |
 | `Sandbox` | M3 | `passthrough` 直接执行 | `sandbox-exec` | M9 |
-| `PermissionPolicy` | M3 | 永远 `allow` | 触发 `Interaction` | M7 |
+| `PermissionPolicy` | M3 | 默认 `allow`，可配置拒绝 | 触发 `Interaction` | M7 |
 | `SpanExporter` | M6 | 打到 stderr | Laminar | M11 |
 | `CompactPolicy` 的 resource 输入 | M5 | `undefined` | 接入探针快照 | M10 |
 | 工具调用形态 | M3 | 仅原生 tool calling | 验证本地服务的原生 tool calling 兼容性 | M11 |

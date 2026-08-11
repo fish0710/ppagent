@@ -12,7 +12,8 @@
 
 - M0：工程骨架、依赖方向规则与 CI 已完成
 - M1：核心类型契约已完成
-- M2：模型调用层与测试 provider 正在进行
+- M2：模型调用层与测试 provider 已完成
+- M3：工具注册、四关执行链与 read/write/edit/bash 已完成
 - 其余里程碑见[在线介绍页](https://fish0710.github.io/ppagent/#roadmap)
 
 目前还没有可安装的发行版本，也还不能作为完整 agent 运行。
@@ -27,6 +28,17 @@ npm run build
 npm run depcruise
 npm test
 ```
+
+### 验证工具执行链
+
+```bash
+node bin/agent.js --tool read --args '{"path":"package.json"}'
+node bin/agent.js --tool bash --args '{"cmd":"yes | head -100000"}'
+node bin/agent.js --tool read --args '{"path":123}'
+```
+
+最后一条会返回 `isError: true` 的工具结果，而不是抛异常；超长结果会保留头尾并置
+`truncated: true`。
 
 ### 验证本地 OpenAI-compatible 服务
 
