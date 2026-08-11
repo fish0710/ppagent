@@ -167,6 +167,7 @@ function truncateText(text: string, budget: number): string {
   let tailLength = Math.floor(keep / 2);
   let omitted = text.slice(headLength, text.length - tailLength);
   let marker = markerFor(countLines(omitted));
+  // 第一遍用占位行数估算 marker；第二遍按真实行数长度重新分配头尾预算。
   keep = Math.max(0, budget - marker.length);
   headLength = Math.ceil(keep / 2);
   tailLength = Math.floor(keep / 2);

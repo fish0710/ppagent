@@ -621,7 +621,7 @@ node bin/agent.js --session s2 --max-tokens 2000 "一个需要读十个文件的
 
 **必测的取消场景**
 1. 模型正在流式输出时 Ctrl+C
-2. bash 工具正在跑一个长命令时 Ctrl+C —— 子进程必须被杀掉，不能变成孤儿进程
+2. bash 工具正在跑一个长命令时 Ctrl+C —— 子进程必须被杀掉，不能变成孤儿进程；测试命令必须包含后台孙进程（如 `sleep 120 & sleep 120`），并断言取消后对应 PID 已不存在
 3. 多个工具并发执行时 Ctrl+C
 
 **验收**
@@ -653,6 +653,7 @@ node bin/agent.js "跑 sleep 300"             # Ctrl+C 后 ps 里没有残留的
 - `agent/provider/index.ts` —— 按配置选模型、取凭证
 - `agent/permissions/index.ts` —— 真实实现：`privileged` 工具触发 `interaction.prompt()`
 - `agent/admission/index.ts` —— 仍是桩，但从这里读配置
+- `Tool` 增加可选的 `describe(args): string` 权限摘要钩子；确认框首行展示具体命令或路径（例如 `rm -rf /tmp/x`），完整参数继续放在 detail，不能只显示 `Execute privileged tool bash`
 
 **核心约束再强调**：`core/` 的任何文件都不读配置。配置在 `agent/session.ts` 装配时以构造参数传下去。违反这条，`core/` 就不再可单测。
 

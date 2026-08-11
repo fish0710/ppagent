@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { Tool } from '../../types.js';
 import { textOutput } from '../execute.js';
 import { objectArgs, stringArg } from './common.js';
@@ -65,15 +65,20 @@ async function runProcess(
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   if (signal.aborted) throw signal.reason ?? new Error('Command aborted');
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // 独立进程组让取消能够同时终止 shell 及其所有后代进程。
+      detached: true,
+    });
     let stdout = '';
     let stderr = '';
     let settled = false;
     const onAbort = (): void => {
       if (settled) return;
       settled = true;
-      child.kill('SIGTERM');
-      const killTimer = setTimeout(() => child.kill('SIGKILL'), 250);
+      killProcessGroup(child, 'SIGTERM');
+      const killTimer = setTimeout(() => killProcessGroup(child, 'SIGKILL'), 250);
       killTimer.unref();
       signal.removeEventListener('abort', onAbort);
       reject(signal.reason ?? new Error('Command aborted'));
@@ -104,4 +109,16 @@ async function runProcess(
       resolve({ code: code ?? 1, stdout, stderr });
     });
   });
+}
+
+function killProcessGroup(
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    if (child.pid === undefined) child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch {
+    // 进程组可能在信号发出前已经自然退出（ESRCH）。
+  }
 }

@@ -85,6 +85,42 @@ describe('built-in tools', () => {
     expect(wrapped).toEqual(["printf 'hello'", "printf 'bad' >&2; exit 3"]);
   });
 
+  it('kills background descendants when bash is cancelled', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'ppagent-tools-'));
+    const controller = new AbortController();
+    const pidFile = join(directory, 'child.pid');
+    let descendantPid: number | undefined;
+    let execution: ReturnType<typeof run> | undefined;
+    try {
+      execution = run(
+        'bash',
+        { cmd: 'sleep 120 & echo $! > child.pid; wait' },
+        toolContext(directory, controller.signal),
+        new PassthroughSandbox(),
+        5_000,
+      );
+      descendantPid = Number.parseInt(await waitForFile(pidFile), 10);
+      expect(Number.isInteger(descendantPid)).toBe(true);
+      expect(processIsAlive(descendantPid)).toBe(true);
+
+      controller.abort();
+      const result = await execution;
+
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ text: 'Tool execution aborted.' }],
+      });
+      await waitForProcessExit(descendantPid);
+      expect(processIsAlive(descendantPid)).toBe(false);
+    } finally {
+      controller.abort();
+      if (execution !== undefined) await execution;
+      if (descendantPid !== undefined && processIsAlive(descendantPid)) {
+        process.kill(descendantPid, 'SIGKILL');
+      }
+    }
+  });
+
   it('returns a sandbox denial without touching the filesystem', async () => {
     directory = await mkdtemp(join(tmpdir(), 'ppagent-tools-'));
     const result = await run(
@@ -113,6 +149,7 @@ async function run(
   args: unknown,
   ctx: ToolContext,
   sandbox: PassthroughSandbox,
+  toolTimeoutMs = 2_000,
 ) {
   return executeToolCall(
     createBuiltinToolRegistry(),
@@ -123,11 +160,14 @@ async function run(
       permissions: new StubPermissionPolicy(),
       sandbox,
     },
-    { maxResultChars: 10_000, toolTimeoutMs: 2_000 },
+    { maxResultChars: 10_000, toolTimeoutMs },
   );
 }
 
-function toolContext(cwd: string): ToolContext {
+function toolContext(
+  cwd: string,
+  signal: AbortSignal = new AbortController().signal,
+): ToolContext {
   const trace: TraceContext = {
     traceId: 'trace',
     spanId: 'span',
@@ -142,9 +182,54 @@ function toolContext(cwd: string): ToolContext {
     notify: () => undefined,
   };
   return {
-    signal: new AbortController().signal,
+    signal,
     cwd,
     trace,
     interaction,
   };
+}
+
+async function waitForFile(path: string): Promise<string> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      const value = (await readFile(path, 'utf8')).trim();
+      if (value.length > 0) return value;
+    } catch (error) {
+      if (!hasCode(error, 'ENOENT')) throw error;
+    }
+    await delay(10);
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (!processIsAlive(pid)) return;
+    await delay(10);
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (hasCode(error, 'ESRCH')) return false;
+    throw error;
+  }
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === code
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
