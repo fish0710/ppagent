@@ -470,6 +470,17 @@ export interface CompactSignals {
   resource?: ResourceSnapshot;
 }
 
+/**
+ * 上下文计数器由调用方注入，core/context 不绑定某一家模型的 tokenizer。
+ * M5 默认提供 o200k_base BPE 实现；M11 可替换成本地模型的 tokenizer。
+ */
+export interface TokenCounter {
+  readonly id: string;
+  countText(text: string): number;
+  countMessages(messages: readonly Message[]): number;
+  countContext(context: Context): number;
+}
+
 export interface CompactResult {
   /** 压缩后的完整上下文：[摘要, ...保留的最近消息] */
   messages: Message[];
@@ -478,6 +489,8 @@ export interface CompactResult {
   replacedCount: number;
   tokensBefore: number;
   tokensAfter: number;
+  /** 生成本次摘要的策略元信息，持久化 compaction 记录时原样写入。 */
+  meta: SummarizeMeta;
 }
 
 export interface CompactPolicy {
@@ -486,7 +499,17 @@ export interface CompactPolicy {
     messages: Message[],
     trigger: CompactTrigger,
     summarizer: Summarizer,
+    execution: CompactExecutionContext,
   ): Promise<CompactResult>;
+}
+
+export interface CompactExecutionContext {
+  /** 覆盖式压缩产生的上一版摘要；新摘要必须累积它。 */
+  previousSummary?: Message;
+  systemPrompt?: string;
+  targetTokens?: number;
+  signal: AbortSignal;
+  trace: TraceContext;
 }
 
 /**

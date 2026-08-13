@@ -12,7 +12,20 @@ import {
   type ModelRef,
   type Provider,
 } from '../dist/core/llm/index.js';
-import { runAgentLoop } from '../dist/core/loop/index.js';
+import {
+  StructuralSummarizer,
+  ThresholdCompactPolicy,
+  O200kTokenCounter,
+} from '../dist/core/context/index.js';
+import {
+  runAgentLoop,
+  type AgentLoopPersistence,
+} from '../dist/core/loop/index.js';
+import {
+  JsonlStore,
+  latestCompaction,
+  replay,
+} from '../dist/core/store/index.js';
 import { StubAdmissionController } from '../dist/agent/admission/index.js';
 import { StubPermissionPolicy } from '../dist/agent/permissions/index.js';
 import { PassthroughSandbox } from '../dist/core/sandbox/index.js';
@@ -21,7 +34,10 @@ import {
   executeToolCall,
 } from '../dist/core/tools/index.js';
 import type {
+  CompactResult,
   Interaction,
+  Message,
+  StoreRecord,
   ToolContext,
   TraceContext,
   UIEvent,
@@ -46,6 +62,9 @@ interface ToolArgs {
 
 interface AgentArgs extends SmokeArgs {
   maxTurns: number;
+  maxTokens?: number;
+  session?: string;
+  resume: boolean;
 }
 
 function printVersion(): void {
@@ -55,7 +74,8 @@ function printVersion(): void {
 function printHelp(): void {
   process.stdout.write(`Usage:
   agent --version
-  agent [--provider faux|anthropic|openai|custom] [--model MODEL] [--max-turns N] PROMPT
+  agent [--provider faux|anthropic|openai|custom] [--model MODEL] [--max-turns N]
+        [--max-tokens N] [--session ID] [--resume] PROMPT
   agent --smoke [--provider faux|anthropic|openai|custom] [--model MODEL] [PROMPT]
   agent --tool read|write|edit|bash [--args JSON]
 
@@ -134,6 +154,9 @@ async function runSmoke(smokeArgs: SmokeArgs): Promise<void> {
 
 async function runAgent(args: AgentArgs): Promise<void> {
   const { provider, model } = createAgentProvider(args);
+  const session = await prepareSession(args, model);
+  const tokenCounter = new O200kTokenCounter();
+  const contextWindow = args.maxTokens ?? model.contextWindow;
   const controller = new AbortController();
   const onInterrupt = (): void => {
     controller.abort(new Error('Interrupted by user'));
@@ -144,9 +167,7 @@ async function runAgent(args: AgentArgs): Promise<void> {
     const result = await runAgentLoop({
       provider,
       model,
-      context: {
-        messages: [{ role: 'user', content: args.prompt, timestamp: Date.now() }],
-      },
+      context: session.context,
       registry: createBuiltinToolRegistry(),
       toolContext: {
         signal: controller.signal,
@@ -162,6 +183,26 @@ async function runAgent(args: AgentArgs): Promise<void> {
       toolOptions: { maxResultChars: 8_000, toolTimeoutMs: 30_000 },
       loopConfig: { maxTurns: args.maxTurns, turnTimeoutMs: 120_000 },
       maxToolConcurrency: 4,
+      compaction: {
+        tokenCounter,
+        policy: new ThresholdCompactPolicy({
+          config: {
+            compactThreshold: 0.8,
+            memPressureThreshold: 0.75,
+            keepRecentMessages: 6,
+          },
+          tokenCounter,
+        }),
+        summarizer: new StructuralSummarizer({ tokenCounter }),
+        contextWindow,
+        targetTokens: Math.max(1, Math.floor(contextWindow * 0.4)),
+        ...(session.previousSummary === undefined
+          ? {}
+          : { previousSummary: session.previousSummary }),
+      },
+      ...(session.persistence === undefined
+        ? {}
+        : { persistence: session.persistence }),
       emit(event) {
         wroteText = renderAgentEvent(event) || wroteText;
       },
@@ -171,6 +212,86 @@ async function runAgent(args: AgentArgs): Promise<void> {
   } finally {
     process.removeListener('SIGINT', onInterrupt);
   }
+}
+
+interface PreparedSession {
+  context: Context;
+  previousSummary?: Message;
+  persistence?: AgentLoopPersistence;
+}
+
+async function prepareSession(
+  args: AgentArgs,
+  model: ModelRef,
+): Promise<PreparedSession> {
+  const userMessage: Message = {
+    role: 'user',
+    content: args.prompt,
+    timestamp: Date.now(),
+  };
+  if (args.session === undefined) {
+    return { context: { messages: [userMessage] } };
+  }
+  const sessionId = args.session;
+
+  const store = new JsonlStore({
+    rootDirectory: join(process.cwd(), '.ppagent', 'sessions'),
+  });
+  let records: StoreRecord[] = [];
+  if (args.resume) {
+    records = await store.load(sessionId);
+  } else {
+    await store.create({
+      id: sessionId,
+      cwd: process.cwd(),
+      model: `${model.provider}/${model.id}`,
+      title: args.prompt.slice(0, 80),
+    });
+  }
+
+  let nextSequence =
+    records.reduce((highest, record) => Math.max(highest, record.seq), 0) + 1;
+  const previous = latestCompaction(records)?.summary;
+  const messages = args.resume ? replay(records, 'compacted') : [];
+  await store.append(sessionId, {
+    kind: 'message',
+    seq: nextSequence,
+    message: userMessage,
+  });
+  nextSequence += 1;
+  messages.push(userMessage);
+
+  const persistence: AgentLoopPersistence = {
+    async appendMessages(newMessages) {
+      for (const message of newMessages) {
+        await store.append(sessionId, {
+          kind: 'message',
+          seq: nextSequence,
+          message,
+        });
+        nextSequence += 1;
+      }
+    },
+    async appendCompaction(result: CompactResult) {
+      await store.append(sessionId, {
+        kind: 'compaction',
+        seq: nextSequence,
+        summary: result.summary,
+        trigger: result.trigger,
+        replacedCount: result.replacedCount,
+        tokensBefore: result.tokensBefore,
+        tokensAfter: result.tokensAfter,
+        meta: result.meta,
+        timestamp: Date.now(),
+      });
+      nextSequence += 1;
+    },
+  };
+  return {
+    context: { messages },
+    ...(previous === undefined ? {} : { previousSummary: previous }),
+    persistence,
+  };
 }
 
 function renderAgentEvent(event: UIEvent): boolean {
@@ -191,12 +312,16 @@ function renderAgentEvent(event: UIEvent): boolean {
     case 'error':
       process.stderr.write(`\n${event.message}\n`);
       return false;
+    case 'compacted':
+      process.stderr.write(
+        `\n[context:compacted] ${event.trigger} ${event.tokensBefore} → ${event.tokensAfter} tokens\n`,
+      );
+      return false;
     case 'turn_start':
     case 'thinking_delta':
     case 'permission_request':
     case 'permission_resolved':
     case 'admission_denied':
-    case 'compacted':
     case 'turn_end':
     case 'loop_end':
       return false;
@@ -263,18 +388,37 @@ function parseAgentArgs(args: string[]): AgentArgs {
   let provider = 'faux';
   let model: string | undefined;
   let maxTurns = 8;
+  let maxTokens: number | undefined;
+  let session: string | undefined;
+  let resume = false;
   const promptParts: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
-    if (arg === '--provider' || arg === '--model' || arg === '--max-turns') {
+    if (arg === '--resume') {
+      resume = true;
+      continue;
+    }
+    if (
+      arg === '--provider' ||
+      arg === '--model' ||
+      arg === '--max-turns' ||
+      arg === '--max-tokens' ||
+      arg === '--session'
+    ) {
       const value = args[index + 1];
       if (value === undefined || value.startsWith('-')) {
         throw new Error(`${arg} requires a value`);
       }
       if (arg === '--provider') provider = value;
       else if (arg === '--model') model = value;
-      else maxTurns = positiveInteger(value, '--max-turns');
+      else if (arg === '--max-turns') {
+        maxTurns = positiveInteger(value, '--max-turns');
+      } else if (arg === '--max-tokens') {
+        maxTokens = positiveInteger(value, '--max-tokens');
+      } else {
+        session = value;
+      }
       index += 1;
       continue;
     }
@@ -283,11 +427,17 @@ function parseAgentArgs(args: string[]): AgentArgs {
   }
   const prompt = promptParts.join(' ').trim();
   if (prompt.length === 0) throw new Error('A prompt is required');
+  if (resume && session === undefined) {
+    throw new Error('--resume requires --session ID');
+  }
   return {
     provider,
     ...(model === undefined ? {} : { model }),
     prompt,
     maxTurns,
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(session === undefined ? {} : { session }),
+    resume,
   };
 }
 
@@ -399,13 +549,14 @@ function createAgentProvider(args: AgentArgs): {
   const provider = new FauxProvider({
     turns: [
       toolCallTurn({
-        id: 'm4-read-package',
+        // session 恢复后历史仍在上下文里；跨进程也必须保持 toolCallId 唯一。
+        id: `faux-read-package-${crypto.randomUUID()}`,
         name: 'read',
         rawArguments: '{"path":"package.json"}',
         argumentChunkSize: 1,
       }),
       textTurn(
-        'package.json declares one runtime dependency: @earendil-works/pi-ai.',
+        'package.json declares runtime dependencies on @earendil-works/pi-ai and gpt-tokenizer.',
         { chunkSize: 8 },
       ),
     ],

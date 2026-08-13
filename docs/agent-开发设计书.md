@@ -582,31 +582,35 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 
 **目标**：长对话不爆上下文，退出后能恢复。
 
+**开发计划（已完成）**
+1. 定义可注入的 `TokenCounter`，默认用 `o200k_base` BPE tokenizer 做真实分词计账；本地模型 tokenizer 在 M11 可替换，不使用字符数估算。
+2. 实现 token / memory 双阈值策略。把 `keepRecentMessages` 仅作为候选起点，从该处向前寻找不切断 toolCall/toolResult 的安全边界；压缩后 token 不下降时保持原视图。
+3. 实现累积式 `StructuralSummarizer`：上一版摘要通过 `previousSummary` 单独传入，新摘要覆盖它代表的全部历史，并以 UserMessage 放在上下文首位。
+4. 把 `replay(records, 'compacted' | 'full')` 做成无 I/O、无输入变更的纯函数，并分别测试最后一次覆盖式压缩投影和完整调试投影。
+5. 实现每 session 一组 `meta.json + records.jsonl` 的 append-only Store；由 loop 负责搬运 message/compaction 记录，不让 context、store、llm 互相依赖。
+6. 接入 `--session`、`--resume` 和 `--max-tokens` 验收路径，补齐安全边界、二次累积、replay、JSONL 与 loop 集成测试。
+
 **交付**
 - `core/context/manager.ts` —— 消息存储、token 计账（用 tokenizer 库，别估算）
 - `core/context/compact.ts` —— 实现 `CompactPolicy`
+- `core/context/tokenizer.ts` —— 可替换的 BPE token 计数器
 - `core/store/jsonl.ts` —— 每条消息一行 JSON 追加写，恢复时逐行读
+- `core/store/replay.ts` —— compacted/full 两种纯投影
 
 **桩**
 ```ts
-// 云端阶段：只有 token 一个输入源
+// 云端阶段：resource 为 undefined，只有 token 输入源生效
 shouldCompact(s: CompactSignals) {
-  return s.tokenUsage > s.contextWindow * 0.8;
-  // 本地阶段追加：|| (s.resource && s.resource.memPressure > 0.75)
+  if (s.resource?.memPressure >= 0.75) return 'memory';
+  return s.tokenUsage >= s.contextWindow * 0.8 ? 'token' : null;
 }
 ```
 `CompactSignals.resource` 此时为 `undefined`。
 
 **关键设计**：`context/` 不认识 `llm/`。压缩需要调模型生成摘要，这个能力由 loop 在构造时注入：
 
-```ts
-// core/loop/index.ts
-const ctx = new ContextManager({
-  maxTokens: cfg.context.maxTokens,
-  summarize: (msgs) => this.provider.complete(summaryPrompt(msgs)),   // ← 注入
-  probe: this.probe,                                                   // ← 注入
-});
-```
+loop 只接收 `TokenCounter`、`CompactPolicy`、`Summarizer` 和两个持久化回调。
+`ContextManager` 不 import provider，`JsonlStore` 也不 import loop；摘要策略以后即使换成模型调用，仍由装配层注入。
 
 搬运责任也在 loop：从 store 读出消息塞进 context，context 变更后写回 store。两个组件互不认识。
 
@@ -617,6 +621,9 @@ node bin/agent.js --session s1 --resume "继续上一步"   # 模型记得任务
 node bin/agent.js --session s2 --max-tokens 2000 "一个需要读十个文件的任务"
 # 观察 compacted 事件触发，且压缩后模型仍能继续工作
 ```
+
+压缩记录采用覆盖式语义，但磁盘记录永不重写。恢复时 `compacted` 投影从后向前取最后一条
+compaction 的累积摘要及其后消息；`full` 投影忽略 compaction，供调试回溯。
 
 ---
 

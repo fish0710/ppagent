@@ -19,7 +19,8 @@
   },
   "license": "ISC",
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.83.0"
+    "@earendil-works/pi-ai": "^0.83.0",
+    "gpt-tokenizer": "^3.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

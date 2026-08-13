@@ -15,10 +15,11 @@
 - M2：模型调用层与测试 provider 已完成
 - M3：工具注册、四关执行链与 read/write/edit/bash 已完成
 - M4：流式 ReAct agent loop、工具调度与显式终止事件已完成
+- M5：BPE token 计账、安全上下文压缩、JSONL 会话持久化与 replay 已完成
 - 其余里程碑见[在线介绍页](https://fish0710.github.io/ppagent/#roadmap)
 
-目前已有可运行的 M4 开发验收入口，但还没有可安装的发行版本；持久化、真实权限策略与
-macOS 沙箱仍属于后续里程碑。
+目前已有可运行的 M5 开发验收入口，但还没有可安装的发行版本；真实权限策略与 macOS
+沙箱仍属于后续里程碑。
 
 ## 本地开发
 
@@ -51,6 +52,18 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 默认 faux provider 会脚本化地产生一次 `read` 调用，再读取工具结果进入第二轮并完成任务。
 这个入口用于验证 M4 执行链，不代表最终 CLI；当前权限策略和沙箱仍是可测试的桩实现。
 
+### 验证上下文压缩与恢复
+
+```bash
+node bin/agent.js --session s1 "任务A"
+node bin/agent.js --session s1 --resume "继续上一步"
+node bin/agent.js --session compact-demo --max-tokens 2000 "一个长任务"
+```
+
+会话以 append-only JSONL 保存在当前工作目录的 `.ppagent/sessions/`。`--resume` 默认使用
+最近一次压缩后的投影；压缩前的原始消息仍保留在 JSONL 中。`--max-tokens` 是 M5 的上下文
+窗口验收覆盖值，便于在短任务里触发 `[context:compacted]` 事件。
+
 ### 验证本地 OpenAI-compatible 服务
 
 `PPAGENT_CUSTOM_BASE_URL` 必须是完整的 API 根地址；LM Studio 和
@@ -65,7 +78,7 @@ PPAGENT_CUSTOM_BASE_URL=http://localhost:11434/v1 \
   "读取 package.json 并告诉我依赖了哪些包"
 ```
 
-第二条是 M4 开发验收路径，目前使用自动放行的权限桩和 `PassthroughSandbox`；只应在可信
+第二条是当前开发验收路径，目前使用自动放行的权限桩和 `PassthroughSandbox`；只应在可信
 提示词与可控工作目录中运行。真实人工确认和系统沙箱分别在 M7、M9 落地。
 
 只有服务端启用了认证时才设置 `PPAGENT_CUSTOM_API_KEY`。custom provider 不会读取

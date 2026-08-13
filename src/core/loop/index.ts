@@ -1,12 +1,19 @@
 import type {
+  CompactPolicy,
+  CompactResult,
   Context,
   LoopConfig,
   LoopEndReason,
+  Message,
   ModelRef,
   Provider,
+  ResourceSnapshot,
+  Summarizer,
+  TokenCounter,
   ToolContext,
   UIEvent,
 } from '../types.js';
+import { ContextManager } from '../context/manager.js';
 import type {
   ToolExecutorDeps,
   ToolExecutorOptions,
@@ -27,8 +34,28 @@ export interface AgentLoopOptions {
   toolOptions: ToolExecutorOptions;
   loopConfig: LoopConfig;
   maxToolConcurrency?: number;
+  /** M5 可选装配；不提供时保持 M4 的纯内存追加行为。 */
+  compaction?: AgentLoopCompactionOptions;
+  /** loop 只搬运变更，不认识具体 Store 实现。 */
+  persistence?: AgentLoopPersistence;
   /** UIEvent 是严格有序的同步出口；不提供时仍可把 loop 当普通函数使用。 */
   emit?: (event: UIEvent) => void;
+}
+
+export interface AgentLoopCompactionOptions {
+  tokenCounter: TokenCounter;
+  policy: CompactPolicy;
+  summarizer: Summarizer;
+  /** 测试/CLI 可收窄窗口；默认使用模型声明的 contextWindow。 */
+  contextWindow?: number;
+  previousSummary?: Message;
+  targetTokens?: number;
+  resource?: ResourceSnapshot;
+}
+
+export interface AgentLoopPersistence {
+  appendMessages(messages: readonly Message[]): Promise<void>;
+  appendCompaction(result: CompactResult): Promise<void>;
 }
 
 export interface AgentLoopResult {
@@ -41,7 +68,8 @@ export interface AgentLoopResult {
 /**
  * 运行 ReAct 循环，直到模型正常结束、轮次耗尽、用户取消或出现错误。
  *
- * M4 只维护内存消息数组；M5 再把 context/store/compact 接进来。
+ * context/store/compact 通过窄接口注入：context 不认识 llm，loop 也不认识
+ * JSONL。这样压缩、回放和模型循环都可以分别单测。
  */
 export async function runAgentLoop(
   options: AgentLoopOptions,
@@ -52,11 +80,27 @@ export async function runAgentLoop(
   const definitions = options.registry.definitions();
   // registry 才是本轮可执行工具的事实来源，丢弃调用方可能遗留的旧 tools。
   const { tools: _previousTools, ...contextWithoutTools } = options.context;
-  const context: Context = {
+  const initialContext: Context = {
     ...contextWithoutTools,
     // M4 不做持久化，但也不应把新增消息写回调用方持有的原数组。
     messages: [...options.context.messages],
     ...(definitions.length === 0 ? {} : { tools: definitions }),
+  };
+  const contextManager =
+    options.compaction === undefined
+      ? undefined
+      : new ContextManager({
+          context: initialContext,
+          tokenCounter: options.compaction.tokenCounter,
+          ...(options.compaction.previousSummary === undefined
+            ? {}
+            : { previousSummary: options.compaction.previousSummary }),
+        });
+  const context = contextManager?.context ?? initialContext;
+  const appendMessages = async (...messages: Message[]): Promise<void> => {
+    if (contextManager === undefined) context.messages.push(...messages);
+    else contextManager.append(...messages);
+    await options.persistence?.appendMessages(messages);
   };
   // 所有正常出口都走 finish，保证每次运行恰好产生一个 loop_end。
   const finish = (reason: LoopEndReason, turns: number): AgentLoopResult => {
@@ -76,6 +120,32 @@ export async function runAgentLoop(
       turn,
     );
     try {
+      if (contextManager !== undefined && options.compaction !== undefined) {
+        const compacted = await contextManager.compactIfNeeded({
+          policy: options.compaction.policy,
+          summarizer: options.compaction.summarizer,
+          contextWindow:
+            options.compaction.contextWindow ?? options.model.contextWindow,
+          signal: control.signal,
+          trace: options.toolContext.trace.child(`compact-turn-${turn}`),
+          ...(options.compaction.resource === undefined
+            ? {}
+            : { resource: options.compaction.resource }),
+          ...(options.compaction.targetTokens === undefined
+            ? {}
+            : { targetTokens: options.compaction.targetTokens }),
+        });
+        if (compacted !== null) {
+          // compaction 记录先落盘，再让模型消费新视图；恢复时不会看到半次压缩。
+          await options.persistence?.appendCompaction(compacted);
+          emit({
+            type: 'compacted',
+            trigger: compacted.trigger,
+            tokensBefore: compacted.tokensBefore,
+            tokensAfter: compacted.tokensAfter,
+          });
+        }
+      }
       const generated = await runReactTurn({
         provider: options.provider,
         model: options.model,
@@ -84,7 +154,7 @@ export async function runAgentLoop(
         emit,
       });
       // 先落 assistant 消息再发 turn_end，订阅者看到事件时内存状态已经一致。
-      context.messages.push(generated.message);
+      await appendMessages(generated.message);
       emit({
         type: 'turn_end',
         turn,
@@ -132,7 +202,7 @@ export async function runAgentLoop(
           },
         );
         // executeReactTools 即使遇到校验失败也返回工具结果，不会打断整轮。
-        context.messages.push(...results);
+        await appendMessages(...results);
         if (signal.aborted) return finish('aborted', turn);
         if (control.timedOut()) {
           emit({
@@ -173,6 +243,13 @@ export async function runAgentLoop(
           });
           return finish('error', turn);
       }
+    } catch (error) {
+      if (signal.aborted) return finish('aborted', turn);
+      emit({
+        type: 'error',
+        message: `Agent loop failed: ${errorMessage(error)}`,
+      });
+      return finish('error', turn);
     } finally {
       // 清理根 signal 监听器与 timer；任何 return 都不能绕过。
       control.dispose();
@@ -181,6 +258,10 @@ export async function runAgentLoop(
 
   // for 的上限已经在工具继续分支显式返回；保留为不可达防线。
   return finish('maxTurns', options.loopConfig.maxTurns);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export { runReactTurn } from './react.js';

@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { StubAdmissionController } from '../src/agent/admission/index.js';
 import { StubPermissionPolicy } from '../src/agent/permissions/index.js';
 import {
+  StructuralSummarizer,
+  ThresholdCompactPolicy,
+} from '../src/core/context/compact.js';
+import { O200kTokenCounter } from '../src/core/context/tokenizer.js';
+import {
   FauxProvider,
   textTurn,
   toolCallTurn,
@@ -11,6 +16,7 @@ import { runAgentLoop, type AgentLoopOptions } from '../src/core/loop/index.js';
 import { PassthroughSandbox } from '../src/core/sandbox/passthrough.js';
 import type {
   Interaction,
+  Message,
   Tool,
   TraceContext,
   UIEvent,
@@ -240,6 +246,59 @@ describe('agent loop', () => {
     expect(concurrencyAtStart.get('u1')).toBe(1);
     expect(order.indexOf('u1:end')).toBeLessThan(order.indexOf('s3:start'));
     expect(concurrencyAtStart.get('s3')).toBe(1);
+  });
+
+  it('compacts before a model turn and persists the replacement record', async () => {
+    const provider = new FauxProvider({ turns: [textTurn('done')] });
+    const events: UIEvent[] = [];
+    const compacted = [] as Parameters<
+      NonNullable<AgentLoopOptions['persistence']>['appendCompaction']
+    >[0][];
+    const persistedMessages: Message[][] = [];
+    const tokenCounter = new O200kTokenCounter();
+    const base = loopOptions(provider, new ToolRegistry([probeTool()]), events);
+
+    const result = await runAgentLoop({
+      ...base,
+      context: {
+        messages: Array.from({ length: 8 }, (_, index) => ({
+          role: 'user' as const,
+          content: `history ${index} ${'long context '.repeat(8)}`,
+          timestamp: index,
+        })),
+      },
+      compaction: {
+        tokenCounter,
+        policy: new ThresholdCompactPolicy({
+          config: {
+            compactThreshold: 0.2,
+            memPressureThreshold: 0.75,
+            keepRecentMessages: 2,
+          },
+          tokenCounter,
+        }),
+        summarizer: new StructuralSummarizer({ tokenCounter }),
+        contextWindow: 100,
+        targetTokens: 40,
+      },
+      persistence: {
+        async appendMessages(messages) {
+          persistedMessages.push([...messages]);
+        },
+        async appendCompaction(record) {
+          compacted.push(record);
+        },
+      },
+    });
+
+    expect(result.reason).toBe('stop');
+    expect(events.some((event) => event.type === 'compacted')).toBe(true);
+    expect(compacted).toHaveLength(1);
+    expect(compacted[0]?.meta.strategy).toBe('structural');
+    expect(result.context.messages[0]).toMatchObject({ role: 'user' });
+    expect(result.context.messages).toHaveLength(4);
+    expect(persistedMessages).toHaveLength(1);
+    expect(persistedMessages[0]?.[0]).toMatchObject({ role: 'assistant' });
   });
 });
 

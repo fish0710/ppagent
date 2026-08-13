@@ -1,4 +1,4 @@
-# ppagent 开发错题本 · M0–M4
+# ppagent 开发错题本 · M0–M5
 
 ### 1.1 Message 用类继承而非判别联合
 
@@ -144,5 +144,17 @@ loop 随后把它误判为任务完成，形成静默降级。
 - 普通正文里只是举例包含 JSON 不报错，避免把“不需要工具”误判为“不支持工具”。
 
 这不是能力探测；endpoint/model/chat-template 的真实兼容性验证仍归 M11。
+
+---
+
+### 5.3 compact 的五个不变量
+
+1. `keepRecentMessages` 是候选起点，不是最终切点；必须向前找到不切断 toolCall/toolResult 配对的边界。
+2. 覆盖式 compaction 下，旧摘要会退出内存视图；新摘要必须显式接收并累积 `previousSummary`，否则会静默忘记最早任务目标。
+3. replay 不能正向边读边替换。`compacted` 投影应从后向前找最后一条 compaction，`full` 投影只取全部 message；两者都是纯函数。
+4. 摘要放在压缩后上下文首位，使用 UserMessage，避免伪装成模型输出，也兼容要求首条为 user 的 provider。
+5. 达到阈值不等于压缩一定有收益。安全边界前历史太短时，摘要头可能比原文更大；`tokensAfter >= tokensBefore` 时必须保留原视图，等待历史继续积累。
+
+M5 用安全边界、连续两次压缩、两种 replay 投影和无收益压缩场景分别守住这些约束。
 
 ---
