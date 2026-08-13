@@ -13,6 +13,7 @@ import type {
 import {
   executeTool,
   executeToolCall,
+  passthroughPrepare,
   textOutput,
 } from '../src/core/tools/execute.js';
 import { ToolRegistry } from '../src/core/tools/registry.js';
@@ -76,6 +77,77 @@ describe('executeTool', () => {
     expect(
       output.content[0]?.type === 'text' ? output.content[0].text.length : Infinity,
     ).toBeLessThanOrEqual(OPTIONS.maxResultChars);
+  });
+
+  it('requires an explicit sandbox preparation contract at runtime', async () => {
+    const execute = vi.fn(async () => textOutput('should not run'));
+    // 模拟绕过 TypeScript 的动态 JS/MCP 工具，运行时边界仍要给出准确诊断。
+    const dynamicTool = {
+      name: 'dynamic',
+      description: 'A dynamically registered tool.',
+      parameters: { type: 'object', additionalProperties: false },
+      execute,
+    } as unknown as Tool;
+
+    const output = await executeTool(
+      dynamicTool,
+      {},
+      CONTEXT,
+      {
+        admission: new StubAdmissionController(),
+        permissions: new StubPermissionPolicy(),
+        sandbox: new PassthroughSandbox(),
+      },
+      OPTIONS,
+    );
+
+    expect(output).toEqual({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: 'Tool dynamic does not implement prepareSandbox.',
+        },
+      ],
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('lets pure tools explicitly opt into passthrough preparation', async () => {
+    const execute = vi.fn(async () => textOutput('computed'));
+    const pureTool: Tool = {
+      name: 'pure',
+      description: 'Compute without filesystem or process access.',
+      parameters: {
+        type: 'object',
+        properties: { value: { type: 'string' } },
+        required: ['value'],
+        additionalProperties: false,
+      },
+      prepareSandbox: passthroughPrepare,
+      execute,
+    };
+
+    const output = await executeTool(
+      pureTool,
+      { value: 'ok' },
+      CONTEXT,
+      {
+        admission: new StubAdmissionController(),
+        permissions: new StubPermissionPolicy(),
+        sandbox: new PassthroughSandbox(),
+      },
+      OPTIONS,
+    );
+
+    expect(output).toEqual({
+      isError: false,
+      content: [{ type: 'text', text: 'computed' }],
+    });
+    expect(execute).toHaveBeenCalledWith(
+      { value: 'ok' },
+      expect.objectContaining({ cwd: CONTEXT.cwd }),
+    );
   });
 
   it('short-circuits on a configurable admission denial', async () => {

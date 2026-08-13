@@ -33,6 +33,20 @@ export interface FauxProviderOptions {
   now?: () => number;
 }
 
+export interface FauxToolCallSpec {
+  id?: string;
+  name: string;
+  rawArguments: string;
+  argumentChunkSize?: number;
+  delayMs?: number;
+}
+
+export interface FauxToolCallsTurnOptions {
+  calls: FauxToolCallSpec[];
+  now?: () => number;
+  origin?: AssistantMessage['origin'];
+}
+
 const DEFAULT_MODEL: ModelRef = {
   provider: 'faux',
   id: 'faux-model',
@@ -172,40 +186,67 @@ export function textTurn(
   return { steps };
 }
 
-export function toolCallTurn(options: {
-  id?: string;
-  name: string;
-  rawArguments: string;
-  argumentChunkSize?: number;
-  delayMs?: number;
+export function toolCallTurn(options: FauxToolCallSpec & {
   now?: () => number;
   origin?: AssistantMessage['origin'];
 }): FauxTurn {
-  const call: ToolCallBlock = {
-    type: 'toolCall',
-    id: options.id ?? 'faux-call-1',
-    name: options.name,
-    arguments: parseOrKeepRaw(options.rawArguments),
-  };
-  const steps: FauxStep[] = [{ type: 'toolcall_start', index: 0 }];
-  for (const chunk of splitText(
-    options.rawArguments,
-    (options.argumentChunkSize ?? options.rawArguments.length) || 1,
-  )) {
-    if ((options.delayMs ?? 0) > 0) {
-      steps.push({ type: 'delay', ms: options.delayMs ?? 0 });
-    }
-    steps.push({ type: 'toolcall_delta', index: 0, delta: chunk });
+  return toolCallsTurn({
+    calls: [
+      {
+        ...(options.id === undefined ? {} : { id: options.id }),
+        name: options.name,
+        rawArguments: options.rawArguments,
+        ...(options.argumentChunkSize === undefined
+          ? {}
+          : { argumentChunkSize: options.argumentChunkSize }),
+        ...(options.delayMs === undefined ? {} : { delayMs: options.delayMs }),
+      },
+    ],
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.origin === undefined ? {} : { origin: options.origin }),
+  });
+}
+
+/**
+ * 构造一轮包含多个原生工具调用的流。所有槽位先 start，参数 chunk 再按
+ * index 轮询交错发出，用来稳定复现真实 provider 的并行分片行为。
+ */
+export function toolCallsTurn(options: FauxToolCallsTurnOptions): FauxTurn {
+  if (options.calls.length === 0) {
+    throw new Error('toolCallsTurn requires at least one call');
   }
-  steps.push({ type: 'toolcall_end', index: 0, call });
+  const calls: ToolCallBlock[] = options.calls.map((spec, index) => ({
+    type: 'toolCall',
+    id: spec.id ?? `faux-call-${index + 1}`,
+    name: spec.name,
+    arguments: parseOrKeepRaw(spec.rawArguments),
+  }));
+  const chunks = options.calls.map((spec) =>
+    splitText(
+      spec.rawArguments,
+      (spec.argumentChunkSize ?? spec.rawArguments.length) || 1,
+    ),
+  );
+  const steps: FauxStep[] = calls.map((_call, index) => ({
+    type: 'toolcall_start',
+    index,
+  }));
+  const maxChunks = Math.max(...chunks.map((callChunks) => callChunks.length));
+  for (let chunkIndex = 0; chunkIndex < maxChunks; chunkIndex += 1) {
+    for (let callIndex = 0; callIndex < calls.length; callIndex += 1) {
+      const chunk = chunks[callIndex]?.[chunkIndex];
+      if (chunk === undefined) continue;
+      const delayMs = options.calls[callIndex]?.delayMs ?? 0;
+      if (delayMs > 0) steps.push({ type: 'delay', ms: delayMs });
+      steps.push({ type: 'toolcall_delta', index: callIndex, delta: chunk });
+    }
+  }
+  calls.forEach((call, index) => {
+    steps.push({ type: 'toolcall_end', index, call });
+  });
   steps.push({
     type: 'done',
-    message: assistantMessage(
-      [call],
-      'toolUse',
-      options.now,
-      options.origin,
-    ),
+    message: assistantMessage(calls, 'toolUse', options.now, options.origin),
   });
   return { steps };
 }

@@ -5,18 +5,17 @@ import {
   FauxProvider,
   textTurn,
   toolCallTurn,
-  type FauxTurn,
+  toolCallsTurn,
 } from '../src/core/llm/faux.js';
 import { runAgentLoop, type AgentLoopOptions } from '../src/core/loop/index.js';
 import { PassthroughSandbox } from '../src/core/sandbox/passthrough.js';
 import type {
   Interaction,
   Tool,
-  ToolCallBlock,
   TraceContext,
   UIEvent,
 } from '../src/core/types.js';
-import { textOutput } from '../src/core/tools/execute.js';
+import { passthroughPrepare, textOutput } from '../src/core/tools/execute.js';
 import { ToolRegistry } from '../src/core/tools/registry.js';
 
 describe('agent loop', () => {
@@ -165,7 +164,15 @@ describe('agent loop', () => {
       active -= 1;
     });
     const provider = new FauxProvider({
-      turns: [multiToolTurn(), textTurn('done')],
+      turns: [
+        toolCallsTurn({
+          calls: [
+            { id: 'call-1', name: 'probe', rawArguments: '{"value":"one"}' },
+            { id: 'call-2', name: 'probe', rawArguments: '{"value":"two"}' },
+          ],
+        }),
+        textTurn('done'),
+      ],
     });
     const events: UIEvent[] = [];
 
@@ -178,6 +185,61 @@ describe('agent loop', () => {
     expect(peak).toBe(2);
     expect(events.filter((event) => event.type === 'tool_start')).toHaveLength(2);
     expect(events.filter((event) => event.type === 'tool_end')).toHaveLength(2);
+  });
+
+  it('uses unsafe calls as barriers between concurrency-safe batches', async () => {
+    const order: string[] = [];
+    let active = 0;
+    let peak = 0;
+    const concurrencyAtStart = new Map<string, number>();
+    const record = async (args: unknown): Promise<void> => {
+      const value = (args as { value: string }).value;
+      active += 1;
+      peak = Math.max(peak, active);
+      concurrencyAtStart.set(value, active);
+      order.push(`${value}:start`);
+      await delay(value.startsWith('s') && value !== 's3' ? 20 : 2);
+      order.push(`${value}:end`);
+      active -= 1;
+    };
+    const provider = new FauxProvider({
+      turns: [
+        toolCallsTurn({
+          calls: [
+            { name: 'safe', rawArguments: '{"value":"s1"}' },
+            { name: 'safe', rawArguments: '{"value":"s2"}' },
+            { name: 'unsafe', rawArguments: '{"value":"u1"}' },
+            { name: 'safe', rawArguments: '{"value":"s3"}' },
+          ],
+        }),
+        textTurn('done'),
+      ],
+    });
+    const events: UIEvent[] = [];
+
+    const result = await runAgentLoop({
+      ...loopOptions(
+        provider,
+        new ToolRegistry([
+          namedTool('safe', true, record),
+          namedTool('unsafe', false, record),
+        ]),
+        events,
+      ),
+      maxToolConcurrency: 2,
+    });
+
+    expect(result.reason).toBe('stop');
+    expect(new Set(order.slice(0, 2))).toEqual(
+      new Set(['s1:start', 's2:start']),
+    );
+    expect(peak).toBe(2);
+    const unsafeStart = order.indexOf('u1:start');
+    expect(order.indexOf('s1:end')).toBeLessThan(unsafeStart);
+    expect(order.indexOf('s2:end')).toBeLessThan(unsafeStart);
+    expect(concurrencyAtStart.get('u1')).toBe(1);
+    expect(order.indexOf('u1:end')).toBeLessThan(order.indexOf('s3:start'));
+    expect(concurrencyAtStart.get('s3')).toBe(1);
   });
 });
 
@@ -215,8 +277,16 @@ function loopOptions(
 function probeTool(
   inspect: (args: unknown) => void | Promise<void> = () => undefined,
 ): Tool {
+  return namedTool('probe', true, inspect);
+}
+
+function namedTool(
+  name: string,
+  concurrencySafe: boolean,
+  inspect: (args: unknown) => void | Promise<void>,
+): Tool {
   return {
-    name: 'probe',
+    name,
     description: 'Record one value.',
     parameters: {
       type: 'object',
@@ -224,46 +294,12 @@ function probeTool(
       required: ['value'],
       additionalProperties: false,
     },
-    concurrencySafe: true,
-    prepareSandbox: (args) => ({ allowed: true, args }),
+    concurrencySafe,
+    prepareSandbox: passthroughPrepare,
     async execute(args) {
       await inspect(args);
       return textOutput('recorded');
     },
-  };
-}
-
-function multiToolTurn(): FauxTurn {
-  const first = toolCall('call-1', 'one');
-  const second = toolCall('call-2', 'two');
-  return {
-    steps: [
-      { type: 'toolcall_start', index: 0 },
-      { type: 'toolcall_delta', index: 0, delta: '{"value":"one"}' },
-      { type: 'toolcall_end', index: 0, call: first },
-      { type: 'toolcall_start', index: 1 },
-      { type: 'toolcall_delta', index: 1, delta: '{"value":"two"}' },
-      { type: 'toolcall_end', index: 1, call: second },
-      {
-        type: 'done',
-        message: {
-          role: 'assistant',
-          content: [first, second],
-          stopReason: 'toolUse',
-          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          timestamp: 2,
-        },
-      },
-    ],
-  };
-}
-
-function toolCall(id: string, value: string): ToolCallBlock {
-  return {
-    type: 'toolCall',
-    id,
-    name: 'probe',
-    arguments: { value },
   };
 }
 

@@ -4,6 +4,7 @@ import {
   errorTurn,
   textTurn,
   toolCallTurn,
+  toolCallsTurn,
   type FauxTurn,
 } from '../src/core/llm/faux.js';
 import type {
@@ -58,6 +59,48 @@ describe('FauxProvider', () => {
     ).toBe(rawArguments);
     expect(events.find((event) => event.type === 'toolcall_end')).toMatchObject({
       call: { id: 'faux-call-1', name: 'read', arguments: rawArguments },
+    });
+  });
+
+  it('interleaves argument chunks for multiple tool-call slots', async () => {
+    const provider = new FauxProvider({
+      turns: [
+        toolCallsTurn({
+          calls: [
+            {
+              id: 'call-a',
+              name: 'read',
+              rawArguments: 'AB',
+              argumentChunkSize: 1,
+            },
+            {
+              id: 'call-b',
+              name: 'read',
+              rawArguments: '12',
+              argumentChunkSize: 1,
+            },
+          ],
+        }),
+      ],
+    });
+
+    const events = await collect(provider);
+    expect(
+      events
+        .filter(
+          (event): event is Extract<StreamEvent, { type: 'toolcall_delta' }> =>
+            event.type === 'toolcall_delta',
+        )
+        .map(({ index, delta }) => `${index}:${delta}`),
+    ).toEqual(['0:A', '1:1', '0:B', '1:2']);
+    expect(events.at(-1)).toMatchObject({
+      type: 'done',
+      message: {
+        content: [
+          { id: 'call-a', name: 'read', arguments: 'AB' },
+          { id: 'call-b', name: 'read', arguments: 12 },
+        ],
+      },
     });
   });
 

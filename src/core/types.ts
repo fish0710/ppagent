@@ -296,6 +296,8 @@ export interface Tool extends ToolDef {
   /**
    * 在真正执行前应用沙箱策略，并可把参数转换为沙箱准备后的内部形态。
    * read/write/edit 在这里检查绝对路径；bash 在这里取得包装后的命令。
+   * 该方法刻意保持必填；纯计算工具应显式使用 tools/execute 导出的
+   * passthroughPrepare，不能因遗漏安全声明而默认放行。
    */
   prepareSandbox(
     args: unknown,

@@ -280,6 +280,7 @@ export interface ToolContext {
 }
 
 export interface Tool extends ToolDef {
+  /** 必填；纯计算工具显式使用 passthroughPrepare，不能因遗漏而默认放行 */
   prepareSandbox(args: unknown, ctx: ToolContext, sandbox: Sandbox):
     | { allowed: true; args: unknown }
     | { allowed: false; reason: string; escalatable: boolean };
@@ -486,6 +487,7 @@ OpenAI-compatible API 根地址；LM Studio 和 llama.cpp 通常需要以 `/v1` 
 **交付**
 - `core/tools/registry.ts` —— 注册、查找、生成工具定义的 JSON Schema
 - `core/tools/validate.ts` —— 不依赖第三方 schema 库的 JSON Schema 子集校验
+- `core/tools/execute.ts` 导出 `passthroughPrepare` —— 纯计算工具显式声明不需要路径检查或命令包装；不把 `prepareSandbox` 改成可选
 - `core/tools/execute.ts` —— 执行链骨架：
 
   ```ts
@@ -533,6 +535,7 @@ node bin/agent.js --tool read --args '{"path":'                       # raw stri
 - M2 的 `parseOrKeepRaw` 会把畸形 JSON 保留为 string；M3 必须让该 string 进入 schema 校验并返回工具错误，不能在边界处重新 `JSON.parse` 后抛异常。
 - 截断保留头尾，中间写入 `[... N 行已省略 ...]`，并在 `ToolOutput` 与 `ToolResultMessage` 上透传 `truncated: true`。
 - `Sandbox` 的真实契约不是伪码里的 `run(fn)`：进程内文件工具通过 `checkPath` 事前检查，bash 通过 `wrapCommand` 取得受控命令。`Tool.prepareSandbox` 把这一步纳入统一执行链。
+- `prepareSandbox` 是安全声明而非可省略样板，保持类型必填。动态 JS/MCP 工具可能绕过 TypeScript，因此执行边界还会检查它是否为函数；缺失时返回 `Tool <name> does not implement prepareSandbox.`，不能伪装成笼统的沙箱准备失败。
 
 ---
 
@@ -547,11 +550,11 @@ node bin/agent.js --tool read --args '{"path":'                       # raw stri
 
 **开发计划（已完成）**
 1. 在 `react.ts` 收敛单轮流：按 index 管理工具调用槽位，增量拼接参数，只在 `toolcall_end` 解析 JSON。
-2. 在 `react.ts` 调度动作：安全工具限流并发，非安全工具作为批次间的串行屏障。
+2. 在 `react.ts` 调度动作：安全工具限流并发，非安全工具作为批次间的串行屏障；用 `[safe, safe, unsafe, safe]` 时序测试守住“前批完成 → unsafe 单独执行 → 后批开始”的不变量。
 3. 在 `index.ts` 管理跨轮状态：追加 assistant/toolResult 消息，并决定继续或终止。
 4. 用统一的 `loop_end` UIEvent 显式报告 `stop`、`maxTurns`、`aborted` 或 `error`，每次运行恰好发出一次。
 5. 在单轮普通文本结束后做保守的原生工具调用诊断，只识别 `<tool_call>` 和命中注册工具名的顶层 JSON。
-6. 以 faux provider 覆盖碎片参数、三种终止条件、诊断正反例和并发调度，再接最小 CLI 验收入口。
+6. 以 faux provider 覆盖碎片参数、三种终止条件、诊断正反例和并发调度；`toolCallsTurn` 能构造多调用且按 index 交错参数 chunk，再接最小 CLI 验收入口。
 
 **桩**
 | 项 | 桩实现 |

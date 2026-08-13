@@ -24,6 +24,15 @@ export interface ToolExecutorOptions {
   now?: () => number;
 }
 
+/**
+ * 纯计算工具可显式使用这个准备器，表示它确认不需要路径检查或命令包装。
+ * prepareSandbox 仍保持必填，避免“忘记声明安全策略”等同于默认放行。
+ */
+export const passthroughPrepare: Tool['prepareSandbox'] = (args) => ({
+  allowed: true,
+  args,
+});
+
 export async function executeTool(
   tool: Tool,
   args: unknown,
@@ -39,6 +48,13 @@ export async function executeTool(
       errorOutput(
         `Invalid arguments for tool ${tool.name}: ${validated.errors.join('; ')}`,
       ),
+    );
+  }
+
+  // Tool 是 TypeScript 契约，但动态注册的 JS/MCP 工具仍需要运行时边界检查。
+  if (typeof tool.prepareSandbox !== 'function') {
+    return finish(
+      errorOutput(`Tool ${tool.name} does not implement prepareSandbox.`),
     );
   }
 
