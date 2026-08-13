@@ -1,7 +1,7 @@
 import { countTokens } from 'gpt-tokenizer';
 import type {
   ContentBlock,
-  Context,
+  ReadonlyContext,
   Message,
   TokenCounter,
 } from '../types.js';
@@ -23,7 +23,7 @@ export class O200kTokenCounter implements TokenCounter {
     return this.countText(JSON.stringify(messages.map(messageTokenShape)));
   }
 
-  countContext(context: Context): number {
+  countContext(context: ReadonlyContext): number {
     return this.countText(
       JSON.stringify({
         ...(context.systemPrompt === undefined

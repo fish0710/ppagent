@@ -7,6 +7,7 @@ import type {
   Message,
   ModelRef,
   Provider,
+  ReadonlyContext,
   ResourceSnapshot,
   Summarizer,
   TokenCounter,
@@ -96,16 +97,20 @@ export async function runAgentLoop(
             ? {}
             : { previousSummary: options.compaction.previousSummary }),
         });
-  const context = contextManager?.context ?? initialContext;
+  const context: ReadonlyContext = contextManager?.context ?? initialContext;
   const appendMessages = async (...messages: Message[]): Promise<void> => {
-    if (contextManager === undefined) context.messages.push(...messages);
+    if (contextManager === undefined) initialContext.messages.push(...messages);
     else contextManager.append(...messages);
     await options.persistence?.appendMessages(messages);
   };
   // 所有正常出口都走 finish，保证每次运行恰好产生一个 loop_end。
   const finish = (reason: LoopEndReason, turns: number): AgentLoopResult => {
     emit({ type: 'loop_end', reason, turns });
-    return { context, reason, turns };
+    return {
+      context: contextManager?.snapshot() ?? initialContext,
+      reason,
+      turns,
+    };
   };
 
   if (signal.aborted) return finish('aborted', 0);

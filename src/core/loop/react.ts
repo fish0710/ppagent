@@ -1,6 +1,6 @@
 import type {
   AssistantMessage,
-  Context,
+  ReadonlyContext,
   ModelRef,
   Provider,
   ToolCallBlock,
@@ -19,7 +19,7 @@ import { ToolRegistry } from '../tools/registry.js';
 export interface ReactTurnOptions {
   provider: Provider;
   model: ModelRef;
-  context: Context;
+  context: ReadonlyContext;
   signal: AbortSignal;
   emit: (event: UIEvent) => void;
 }
@@ -243,7 +243,7 @@ function resultPreview(result: ToolResultMessage): string {
 function completedTurn(
   message: AssistantMessage,
   slots: Map<number, ToolCallAccumulator>,
-  context: Context,
+  context: ReadonlyContext,
 ): ReactTurnResult {
   // done 不能替代 toolcall_end；缺 end 意味着增量参数可能仍是不完整 JSON。
   for (const [index, slot] of slots) {
@@ -313,7 +313,7 @@ function completionError(
 
 function diagnoseTextToolCall(
   message: AssistantMessage,
-  context: Context,
+  context: ReadonlyContext,
   toolCalls: ToolCallBlock[],
 ): string | undefined {
   // “提供了工具 + 普通 stop + 零原生调用”只是诊断前提，本身不代表配置错误。

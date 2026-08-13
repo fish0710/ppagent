@@ -10,6 +10,7 @@ import type {
 export type {
   AssistantMessage,
   Context,
+  ReadonlyContext,
   ModelRef,
   Provider,
   StreamEvent,

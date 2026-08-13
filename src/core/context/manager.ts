@@ -4,6 +4,7 @@ import type {
   CompactTrigger,
   Context,
   Message,
+  ReadonlyContext,
   ResourceSnapshot,
   Summarizer,
   TokenCounter,
@@ -48,13 +49,20 @@ export class ContextManager {
     }
   }
 
-  /** Provider 只读使用；消息变更应通过 append/compact 完成。 */
-  get context(): Context {
+  /** 直接引用但类型为只读视图；数组结构变更只能走 append/compact。 */
+  get context(): ReadonlyContext {
     return this.#context;
   }
 
   get previousSummary(): Message | undefined {
-    return this.#previousSummary;
+    return this.#previousSummary === undefined
+      ? undefined
+      : structuredClone(this.#previousSummary);
+  }
+
+  /** 在 loop 完成时导出可独立持有的结果，不泄漏 manager 的内部引用。 */
+  snapshot(): Context {
+    return structuredClone(this.#context);
   }
 
   append(...messages: Message[]): void {
@@ -114,3 +122,12 @@ export class ContextManager {
     }
   }
 }
+
+type Assert<T extends true> = T;
+type IsReadonlyArray<T extends readonly unknown[]> = T extends unknown[]
+  ? false
+  : true;
+/** 编译期契约测试：getter 一旦退回 Message[]，build 会在这里失败。 */
+type ContextMessagesStayReadonly = Assert<
+  IsReadonlyArray<ContextManager['context']['messages']>
+>;

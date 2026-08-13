@@ -763,6 +763,7 @@ node bin/agent.js "并行分析这十个模块"
 
 **交付**
 - `core/llm/pi-ai.ts` 完成本地 provider 注册与兼容性验证（LM Studio / llama.cpp，见附录 A）；服务端模型或 chat template 变化后重新验证
+- 为 `TokenCounter` 增加按 endpoint/model 选择实现的工厂或注册表；Qwen 等本地模型使用匹配的 tokenizer，不能继续把 o200k 计数当精确值
 - 仅接入具备 OpenAI-compatible 原生 tool calling 能力的模型；不支持的模型不进入 PPAgent 模型清单
 - `core/telemetry/` 增加 Laminar exporter
 - Harbor 适配器，跑 Terminal-Bench

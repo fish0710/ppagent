@@ -125,6 +125,23 @@ describe('context compaction', () => {
     expect(result).toBeNull();
     expect(manager.context.messages).toEqual(original);
   });
+
+  it('does not leak mutable summary or final-context references', async () => {
+    const summary = user('cumulative facts', 1);
+    const manager = new ContextManager({
+      context: { messages: [summary, user('recent', 2)] },
+      tokenCounter: counter,
+      previousSummary: summary,
+    });
+
+    const exposedSummary = manager.previousSummary;
+    if (exposedSummary?.role === 'user') exposedSummary.content = 'tampered';
+    const snapshot = manager.snapshot();
+    snapshot.messages.push(user('outside mutation', 3));
+
+    expect(manager.previousSummary).toEqual(summary);
+    expect(manager.context.messages).toHaveLength(2);
+  });
 });
 
 function compactPolicy(keepRecentMessages: number): ThresholdCompactPolicy {

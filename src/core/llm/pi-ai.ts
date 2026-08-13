@@ -18,7 +18,7 @@ import type {
   AdapterState,
   AssistantMessage,
   ContentBlock,
-  Context,
+  ReadonlyContext,
   JSONValue,
   ModelRef,
   Provider,
@@ -86,7 +86,7 @@ class PiAiProvider implements Provider {
 
   async *stream(
     requested: ModelRef,
-    context: Context,
+    context: ReadonlyContext,
     options: StreamOptions = {},
   ): AsyncIterable<StreamEvent> {
     yield { type: 'start' };
@@ -252,7 +252,7 @@ function toModelRef(model: PiModel<Api>): ModelRef {
 }
 
 function toPiContext(
-  context: Context,
+  context: ReadonlyContext,
   target: PiModel<Api>,
   models: ReturnType<typeof createModels>,
 ): PiContext {

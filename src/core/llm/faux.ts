@@ -1,6 +1,6 @@
 import type {
   AssistantMessage,
-  Context,
+  ReadonlyContext,
   ModelRef,
   Provider,
   StreamEvent,
@@ -83,7 +83,7 @@ export class FauxProvider implements Provider {
 
   async *stream(
     model: ModelRef,
-    _ctx: Context,
+    _ctx: ReadonlyContext,
     opts: StreamOptions = {},
   ): AsyncIterable<StreamEvent> {
     let known: ModelRef;

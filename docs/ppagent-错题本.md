@@ -158,3 +158,17 @@ loop 随后把它误判为任务完成，形成静默降级。
 M5 用安全边界、连续两次压缩、两种 replay 投影和无收益压缩场景分别守住这些约束。
 
 ---
+
+### 5.4 “只读使用”必须成为类型契约
+
+**风险**：getter 返回内部 `Context` 直接引用却仍声明成可写类型时，调用方可以绕过
+`ContextManager.append/compact` 直接 `push/splice`。这样 `messages[0]` 与
+`previousSummary` 可能在远离错误源的下一次压缩才报不一致。
+
+**修法**：区分内部可写 `Context` 和对外 `ReadonlyContext`。`ContextManager.context`、
+`Provider.stream`、React turn 与 token counter 的读取边界全部接收只读视图；loop 结束时通过
+`snapshot()` 返回独立结果。`previousSummary` 同样返回副本，避免另一条引用泄漏路径。
+
+这是编译期安全边界，不是对不可信 JavaScript 插件的运行时隔离；后者若进入支持范围，需要再加冻结或结构化克隆。
+
+---

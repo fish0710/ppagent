@@ -183,7 +183,8 @@ export interface Usage {
 // 2. 上下文
 // ============================================================================
 
-export interface Context {
+/** Provider 与其他消费者拿到的只读上下文视图。 */
+export interface ReadonlyContext {
   /**
    * system prompt 是独立字段，不是 Message 的一种。
    *
@@ -191,7 +192,13 @@ export interface Context {
    * 的消息流、主流 API 里也是独立字段。当成消息处理会导致 compact、
    * store、token 计账三处都要特判。
    */
-  systemPrompt?: string;
+  readonly systemPrompt?: string;
+  readonly messages: readonly Message[];
+  readonly tools?: readonly ToolDef[];
+}
+
+/** 仅上下文所有者使用的可写形状；对外调用边界统一使用 ReadonlyContext。 */
+export interface Context extends ReadonlyContext {
   messages: Message[];
   tools?: ToolDef[];
 }
@@ -263,7 +270,7 @@ export interface Provider {
   listModels(): ModelRef[];
   stream(
     model: ModelRef,
-    ctx: Context,
+    ctx: ReadonlyContext,
     opts?: StreamOptions,
   ): AsyncIterable<StreamEvent>;
 }
@@ -478,7 +485,7 @@ export interface TokenCounter {
   readonly id: string;
   countText(text: string): number;
   countMessages(messages: readonly Message[]): number;
-  countContext(context: Context): number;
+  countContext(context: ReadonlyContext): number;
 }
 
 export interface CompactResult {
