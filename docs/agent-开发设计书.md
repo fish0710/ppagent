@@ -388,12 +388,14 @@ export type UIEvent =
   | { type: 'turn_start'; turn: number }
   | { type: 'text_delta'; delta: string }
   | { type: 'thinking_delta'; delta: string }
-  | { type: 'tool_start'; name: string; args: unknown }
-  | { type: 'tool_end'; name: string; isError: boolean; preview: string }
+  | { type: 'tool_start'; id: ToolCallId; name: string; args: unknown }
+  | { type: 'tool_end'; id: ToolCallId; name: string; isError: boolean; preview: string; durationMs: number }
   | { type: 'permission_request'; req: PermissionRequest }
-  | { type: 'admission_denied'; reason: string }
-  | { type: 'compacted'; before: number; after: number; trigger: 'token' | 'memory' }
-  | { type: 'turn_end'; usage: Usage }
+  | { type: 'permission_resolved'; decision: PermissionDecision }
+  | { type: 'admission_denied'; reason: string; retryAfterMs: number | null }
+  | { type: 'compacted'; trigger: CompactTrigger; tokensBefore: number; tokensAfter: number }
+  | { type: 'turn_end'; turn: number; usage: Usage; stopReason: StopReason }
+  | { type: 'loop_end'; reason: 'stop' | 'maxTurns' | 'aborted' | 'error'; turns: number }
   | { type: 'error'; message: string };
 ```
 
@@ -543,13 +545,21 @@ node bin/agent.js --tool read --args '{"path":'                       # raw stri
 - `core/loop/react.ts` —— ReAct 策略（模型交替产出推理与动作）
 - 每轮：调模型 → 收流式事件 → 提取工具调用 → 并发执行 → 结果写回 → 判断是否继续
 
+**开发计划（已完成）**
+1. 在 `react.ts` 收敛单轮流：按 index 管理工具调用槽位，增量拼接参数，只在 `toolcall_end` 解析 JSON。
+2. 在 `react.ts` 调度动作：安全工具限流并发，非安全工具作为批次间的串行屏障。
+3. 在 `index.ts` 管理跨轮状态：追加 assistant/toolResult 消息，并决定继续或终止。
+4. 用统一的 `loop_end` UIEvent 显式报告 `stop`、`maxTurns`、`aborted` 或 `error`，每次运行恰好发出一次。
+5. 在单轮普通文本结束后做保守的原生工具调用诊断，只识别 `<tool_call>` 和命中注册工具名的顶层 JSON。
+6. 以 faux provider 覆盖碎片参数、三种终止条件、诊断正反例和并发调度，再接最小 CLI 验收入口。
+
 **桩**
 | 项 | 桩实现 |
 |---|---|
 | 上下文管理 | 消息数组无脑追加，不压缩 |
 | 持久化 | 不落盘 |
-| tracing | `console.error` 打日志 |
-| cancellation | 只在轮次之间检查 signal |
+| tracing | M4 只发完整 UIEvent；Span 在 M6 接入 |
+| cancellation | AbortSignal 传入模型流和工具；M6 再补完整取消可观测性 |
 
 **验收**
 ```bash

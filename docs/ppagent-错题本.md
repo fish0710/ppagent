@@ -1,4 +1,4 @@
-# ppagent 开发错题本 · M0–M3
+# ppagent 开发错题本 · M0–M4
 
 ### 1.1 Message 用类继承而非判别联合
 
@@ -68,7 +68,7 @@ default: { const _x: never = m; return _x; }
 
 ---
 
-### 1.6 bash 孤儿进程（模式 5）⚠️ M3 未修
+### 1.6 bash 孤儿进程（模式 5）✅ M3 已修
 
 **现象**：实测复现——
 
@@ -116,5 +116,33 @@ const onAbort = () => {
 node bin/agent.js "跑 sleep 300"   # Ctrl+C 后
 ps -eo pid,ppid,args | grep sleep  # 应无残留
 ```
+
+---
+
+### 5.1 partial JSON 不能偷读终态参数
+
+**风险**：provider 的 `toolcall_delta` 可能把参数 JSON 切成几十片。loop 如果只读取
+`toolcall_end.call.arguments`，测试看似通过，实际上没有验证流式参数拼接；换一个终态对象不完整的
+兼容服务就会执行错误参数。
+
+**修法**：按 `index` 建工具调用槽位，逐片追加原始字符串，仅在 `toolcall_end` 时执行一次
+`JSON.parse`；解析失败保留 raw string，继续交给 M3 schema 校验作为 `isError: true` 的工具结果。
+测试故意把终态 arguments 改错，并用 `argumentChunkSize: 1` 切出 20 片以上，确保真正使用增量结果。
+
+---
+
+### 5.2 原生工具调用契约需要运行时第二道防线
+
+**风险**：custom endpoint 的 tool calling 能力取决于 model 与服务端 chat template 的组合，
+类型层的 `supportsNativeToolCalling: true` 只是调用方断言。失败时模型可能把工具调用作为普通文本输出，
+loop 随后把它误判为任务完成，形成静默降级。
+
+**修法**：仅当本轮确实提供了 tools、模型以 `stop` 结束且没有原生 toolCall 时做保守诊断：
+
+- 正文出现 `<tool_call>` 包装时明确报配置错误；
+- 正文整体是顶层 JSON，且 `name` 命中本轮注册工具并带 `arguments` 时明确报错；
+- 普通正文里只是举例包含 JSON 不报错，避免把“不需要工具”误判为“不支持工具”。
+
+这不是能力探测；endpoint/model/chat-template 的真实兼容性验证仍归 M11。
 
 ---

@@ -644,6 +644,8 @@ export interface SpanExporter {
 // 定义在 core 而非 app，否则 app 层的类型会被 core 反向依赖，三层就破了。
 // ============================================================================
 
+export type LoopEndReason = 'stop' | 'maxTurns' | 'aborted' | 'error';
+
 export type UIEvent =
   | { type: 'turn_start'; turn: number }
   | { type: 'text_delta'; delta: string }
@@ -668,6 +670,8 @@ export type UIEvent =
       tokensAfter: number;
     }
   | { type: 'turn_end'; turn: number; usage: Usage; stopReason: StopReason }
+  /** 每次 loop 恰好发一次；调用方不需要从 break 或最后一个 turn_end 猜原因。 */
+  | { type: 'loop_end'; reason: LoopEndReason; turns: number }
   | { type: 'error'; message: string };
 
 // ============================================================================

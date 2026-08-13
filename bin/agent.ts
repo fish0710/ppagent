@@ -7,10 +7,12 @@ import {
   findModel,
   isTerminalEvent,
   textTurn,
+  toolCallTurn,
   type Context,
   type ModelRef,
   type Provider,
 } from '../dist/core/llm/index.js';
+import { runAgentLoop } from '../dist/core/loop/index.js';
 import { StubAdmissionController } from '../dist/agent/admission/index.js';
 import { StubPermissionPolicy } from '../dist/agent/permissions/index.js';
 import { PassthroughSandbox } from '../dist/core/sandbox/index.js';
@@ -22,6 +24,7 @@ import type {
   Interaction,
   ToolContext,
   TraceContext,
+  UIEvent,
 } from '../dist/core/types.js';
 import { readCustomSmokeEnvironment } from './smoke-env.js';
 
@@ -41,6 +44,10 @@ interface ToolArgs {
   arguments: unknown;
 }
 
+interface AgentArgs extends SmokeArgs {
+  maxTurns: number;
+}
+
 function printVersion(): void {
   process.stdout.write(`${pkg.name} ${pkg.version}\n`);
 }
@@ -48,6 +55,7 @@ function printVersion(): void {
 function printHelp(): void {
   process.stdout.write(`Usage:
   agent --version
+  agent [--provider faux|anthropic|openai|custom] [--model MODEL] [--max-turns N] PROMPT
   agent --smoke [--provider faux|anthropic|openai|custom] [--model MODEL] [PROMPT]
   agent --tool read|write|edit|bash [--args JSON]
 
@@ -71,13 +79,14 @@ async function main(): Promise<void> {
     await runTool(parseToolArgs(args));
     return;
   }
-  if (!args.includes('--smoke')) {
-    printHelp();
-    process.exitCode = 1;
+  if (args.includes('--smoke')) {
+    await runSmoke(parseSmokeArgs(args));
     return;
   }
+  await runAgent(parseAgentArgs(args));
+}
 
-  const smokeArgs = parseSmokeArgs(args);
+async function runSmoke(smokeArgs: SmokeArgs): Promise<void> {
   const { provider, model } = createSmokeProvider(smokeArgs);
   const context: Context = {
     messages: [
@@ -120,6 +129,77 @@ async function main(): Promise<void> {
   if (!terminal) {
     process.stderr.write('Model stream ended without a terminal event\n');
     process.exitCode = 1;
+  }
+}
+
+async function runAgent(args: AgentArgs): Promise<void> {
+  const { provider, model } = createAgentProvider(args);
+  const controller = new AbortController();
+  const onInterrupt = (): void => {
+    controller.abort(new Error('Interrupted by user'));
+  };
+  process.once('SIGINT', onInterrupt);
+  let wroteText = false;
+  try {
+    const result = await runAgentLoop({
+      provider,
+      model,
+      context: {
+        messages: [{ role: 'user', content: args.prompt, timestamp: Date.now() }],
+      },
+      registry: createBuiltinToolRegistry(),
+      toolContext: {
+        signal: controller.signal,
+        cwd: process.cwd(),
+        trace: rootTrace(),
+        interaction: nonInteractiveInteraction(),
+      },
+      toolDeps: {
+        admission: new StubAdmissionController(),
+        permissions: new StubPermissionPolicy(),
+        sandbox: new PassthroughSandbox(),
+      },
+      toolOptions: { maxResultChars: 8_000, toolTimeoutMs: 30_000 },
+      loopConfig: { maxTurns: args.maxTurns, turnTimeoutMs: 120_000 },
+      maxToolConcurrency: 4,
+      emit(event) {
+        wroteText = renderAgentEvent(event) || wroteText;
+      },
+    });
+    if (wroteText) process.stdout.write('\n');
+    if (result.reason !== 'stop') process.exitCode = 1;
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+  }
+}
+
+function renderAgentEvent(event: UIEvent): boolean {
+  switch (event.type) {
+    case 'text_delta':
+      process.stdout.write(event.delta);
+      return event.delta.length > 0;
+    case 'tool_start':
+      process.stderr.write(
+        `\n[tool:start] ${event.name} ${JSON.stringify(event.args)}\n`,
+      );
+      return false;
+    case 'tool_end':
+      process.stderr.write(
+        `[tool:end] ${event.name} ${event.isError ? 'error' : 'ok'}: ${event.preview}\n`,
+      );
+      return false;
+    case 'error':
+      process.stderr.write(`\n${event.message}\n`);
+      return false;
+    case 'turn_start':
+    case 'thinking_delta':
+    case 'permission_request':
+    case 'permission_resolved':
+    case 'admission_denied':
+    case 'compacted':
+    case 'turn_end':
+    case 'loop_end':
+      return false;
   }
 }
 
@@ -176,6 +256,38 @@ function parseSmokeArgs(args: string[]): SmokeArgs {
     ...(model === undefined ? {} : { model }),
     prompt:
       promptParts.join(' ').trim() || 'Reply with exactly: M2 smoke OK',
+  };
+}
+
+function parseAgentArgs(args: string[]): AgentArgs {
+  let provider = 'faux';
+  let model: string | undefined;
+  let maxTurns = 8;
+  const promptParts: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === undefined) continue;
+    if (arg === '--provider' || arg === '--model' || arg === '--max-turns') {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith('-')) {
+        throw new Error(`${arg} requires a value`);
+      }
+      if (arg === '--provider') provider = value;
+      else if (arg === '--model') model = value;
+      else maxTurns = positiveInteger(value, '--max-turns');
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('-')) throw new Error(`Unknown option: ${arg}`);
+    promptParts.push(arg);
+  }
+  const prompt = promptParts.join(' ').trim();
+  if (prompt.length === 0) throw new Error('A prompt is required');
+  return {
+    provider,
+    ...(model === undefined ? {} : { model }),
+    prompt,
+    maxTurns,
   };
 }
 
@@ -279,6 +391,31 @@ function createSmokeProvider(args: SmokeArgs): {
   throw new Error(`Unsupported smoke provider: ${args.provider}`);
 }
 
+function createAgentProvider(args: AgentArgs): {
+  provider: Provider;
+  model: ModelRef;
+} {
+  if (args.provider !== 'faux') return createSmokeProvider(args);
+  const provider = new FauxProvider({
+    turns: [
+      toolCallTurn({
+        id: 'm4-read-package',
+        name: 'read',
+        rawArguments: '{"path":"package.json"}',
+        argumentChunkSize: 1,
+      }),
+      textTurn(
+        'package.json declares one runtime dependency: @earendil-works/pi-ai.',
+        { chunkSize: 8 },
+      ),
+    ],
+  });
+  return {
+    provider,
+    model: selectModel(provider, 'faux', args.model ?? 'faux-model'),
+  };
+}
+
 function selectModel(provider: Provider, providerId: string, id: string): ModelRef {
   const model = findModel(provider.listModels(), providerId, id);
   if (model === undefined) throw new Error(`Unknown model: ${providerId}/${id}`);
@@ -291,6 +428,14 @@ function parseOrKeepRaw(raw: string): unknown {
   } catch {
     return raw;
   }
+}
+
+function positiveInteger(value: string, option: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${option} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function rootTrace(): TraceContext {
