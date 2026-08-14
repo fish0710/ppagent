@@ -90,6 +90,17 @@ export class SpanRecorder {
   }
 }
 
+/** exporter 批量发送失败时保持遥测旁路语义，不覆盖真正的任务结果。 */
+export async function flushSpanExporter(
+  exporter: SpanExporter | undefined,
+): Promise<void> {
+  try {
+    await exporter?.flush();
+  } catch {
+    // 网络型 exporter 的失败属于遥测故障，不能反向改变 agent 结果。
+  }
+}
+
 function traceContext(
   traceId: string,
   spanId: string,

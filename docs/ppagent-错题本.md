@@ -181,6 +181,10 @@ M5 用安全边界、连续两次压缩、两种 replay 投影和无收益压缩
 **修法**：`export()` 只缓冲完整 span，`flush()` 再按 `parentSpanId` 建树并排序输出。所有正常、
 错误和取消出口由幂等 `ActiveSpan.end()` 收口；exporter 自身抛错必须被隔离，不能把成功任务改成失败。
 
+旁路约束同时覆盖异步 `flush()`：用 `flushSpanExporter()` 吞掉网络型 exporter 的发送失败，
+且 SIGINT listener 等主流程清理必须先执行。否则 finally 中的 flush 异常会覆盖原始任务异常，
+还会让排在它后面的清理逻辑永久跳过。
+
 Span 不复用 UIEvent，也不记录提示词、工具参数和输出正文。UIEvent 保证实时、完整、有序；Span
 允许缓冲和采样，只保存诊断所需的受控结构化元数据。
 

@@ -29,6 +29,7 @@ import {
 import {
   ConsoleSpanExporter,
   createTraceContext,
+  flushSpanExporter,
 } from '../dist/core/telemetry/index.js';
 import { StubAdmissionController } from '../dist/agent/admission/index.js';
 import { StubPermissionPolicy } from '../dist/agent/permissions/index.js';
@@ -218,8 +219,9 @@ async function runAgent(args: AgentArgs): Promise<void> {
     if (wroteText) process.stdout.write('\n');
     if (result.reason !== 'stop') process.exitCode = 1;
   } finally {
-    await spanExporter?.flush();
+    // 监听器清理不能排在可能失败的异步旁路之后。
     process.removeListener('SIGINT', onInterrupt);
+    await flushSpanExporter(spanExporter);
   }
 }
 

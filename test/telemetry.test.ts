@@ -4,6 +4,7 @@ import {
   InMemorySpanExporter,
   SpanRecorder,
   createTraceContext,
+  flushSpanExporter,
 } from '../src/core/telemetry/index.js';
 import type { SpanExporter } from '../src/core/types.js';
 
@@ -71,16 +72,19 @@ describe('telemetry', () => {
     );
   });
 
-  it('keeps exporter failures out of the agent control flow', () => {
+  it('keeps export and flush failures out of the agent control flow', async () => {
     const broken: SpanExporter = {
       export() {
         throw new Error('collector unavailable');
       },
-      async flush() {},
+      async flush() {
+        throw new Error('flush unavailable');
+      },
     };
     const recorder = new SpanRecorder(broken);
     const trace = createTraceContext();
 
     expect(() => recorder.start('safe', trace).end()).not.toThrow();
+    await expect(flushSpanExporter(broken)).resolves.toBeUndefined();
   });
 });
