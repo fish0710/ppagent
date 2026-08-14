@@ -17,10 +17,11 @@
 - M4：流式 ReAct agent loop、工具调度与显式终止事件已完成
 - M5：BPE token 计账、安全上下文压缩、JSONL 会话持久化与 replay 已完成
 - M6：层级 span、console exporter 与端到端干净取消已完成
+- M7：AgentSession 装配、配置合并与人工确认反向通道已完成
 - 其余里程碑见[在线介绍页](https://fish0710.github.io/ppagent/#roadmap)
 
-目前已有可运行的 M6 开发验收入口，但还没有可安装的发行版本；真实权限策略与 macOS
-沙箱仍属于后续里程碑。
+目前已有可运行的 M7 开发验收入口，但还没有可安装的发行版本；脚本友好的 JSON CLI 与
+macOS 系统沙箱仍属于后续里程碑。
 
 ## 本地开发
 
@@ -51,7 +52,29 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 ```
 
 默认 faux provider 会脚本化地产生一次 `read` 调用，再读取工具结果进入第二轮并完成任务。
-这个入口用于验证 M4 执行链，不代表最终 CLI；当前权限策略和沙箱仍是可测试的桩实现。
+命令行现在通过可复用的 `AgentSession` 装配 core 组件；print / JSON 批处理模式仍归 M8。
+
+### 验证配置与人工确认
+
+配置按“内置默认值 < JSON 文件 < 环境变量 < CLI flag”合并：
+
+```json
+{
+  "provider": { "id": "faux" },
+  "loop": { "maxTurns": 8 },
+  "tools": { "maxConcurrency": 4 }
+}
+```
+
+```bash
+node bin/agent.js --config ./agent.json --max-turns 4 "读取 package.json"
+node bin/agent.js "删除 /tmp/test.txt"
+# 确认框首行显示 rm -f /tmp/test.txt；输入 n 后，拒绝结果会返回给模型继续推理
+```
+
+配置的文件、环境变量和命令行解析只发生在 `agent/` 装配层；`core/` 不读取这些外部来源。
+特权工具使用真实人工确认策略，非交互环境默认拒绝。当前 `PassthroughSandbox` 仍是 M9
+之前的沙箱桩，因此确认允许的命令只应在可信工作目录中执行。
 
 ### 验证上下文压缩与恢复
 
@@ -69,7 +92,7 @@ node bin/agent.js --session compact-demo --max-tokens 2000 "一个长任务"
 
 ```bash
 node bin/agent.js --trace "读取 package.json"
-node bin/agent.js --trace "跑 sleep 300"   # 工具开始后按 Ctrl+C
+node bin/agent.js --trace "跑 sleep 300"   # 输入 y 允许命令，工具开始后按 Ctrl+C
 ps -ax -o pid,ppid,pgid,command | grep 'sleep 300'
 ```
 
@@ -91,8 +114,8 @@ PPAGENT_CUSTOM_BASE_URL=http://localhost:11434/v1 \
   "读取 package.json 并告诉我依赖了哪些包"
 ```
 
-第二条是当前开发验收路径，目前使用自动放行的权限桩和 `PassthroughSandbox`；只应在可信
-提示词与可控工作目录中运行。真实人工确认和系统沙箱分别在 M7、M9 落地。
+第二条是当前开发验收路径，使用真实人工确认策略和 `PassthroughSandbox`；只应在可信
+提示词与可控工作目录中运行。系统级沙箱在 M9 落地。
 
 只有服务端启用了认证时才设置 `PPAGENT_CUSTOM_API_KEY`。custom provider 不会读取
 `OPENAI_API_KEY`，避免把真实 OpenAI key 发送给本地服务。

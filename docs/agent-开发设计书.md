@@ -669,21 +669,31 @@ loop 以 `aborted` 结束并输出完整 span 树，再次执行 `ps` 时 Node�
 
 **目标**：`core/` 的零件被组装成一个可复用的 `AgentSession`，人工确认通道打通。
 
+**开发计划**
+1. 在 `agent/config/` 建立默认值、JSON、环境变量、CLI flag 的分层合并与边界校验。
+2. 在 `agent/provider/` 完成 provider/model/credential 选择，保持对外部来源零感知。
+3. 实现 `AgentSession`，统一装配 loop、compact、store、telemetry、工具依赖、事件和取消。
+4. 实现 `InteractivePermissionPolicy`、CLI `Interaction` 与 `Tool.describe`，打通确认反向通道。
+5. 用拒绝删除的集成测试和真实 PTY 验收守住 `toolCallId → toolResult → 下一轮模型` 链路。
+
+以上五步均已完成。
+
 **交付**
 - `agent/session.ts`：
 
   ```ts
   export interface AgentSession {
-    prompt(text: string): Promise<void>;
-    abort(): void;
+    prompt(text: string): Promise<AgentLoopResult>;
+    abort(reason?: unknown): void;
     subscribe(h: (e: UIEvent) => void): () => void;
     setInteraction(i: Interaction): void;
+    readonly context: ReadonlyContext;
   }
   ```
 - `agent/config/index.ts` —— 解析配置文件 + 环境变量 + CLI flag，合并后产出普通对象
 - `agent/provider/index.ts` —— 按配置选模型、取凭证
-- `agent/permissions/index.ts` —— 真实实现：`privileged` 工具触发 `interaction.prompt()`
-- `agent/admission/index.ts` —— 仍是桩，但从这里读配置
+- `agent/permissions/index.ts` —— 真实实现：`privileged` 工具触发 `interaction.confirm()`
+- `agent/admission/index.ts` —— 仍是可配置桩，由 session 通过构造参数注入
 - `Tool` 增加可选的 `describe(args): string` 权限摘要钩子；确认框首行展示具体命令或路径（例如 `rm -rf /tmp/x`），完整参数继续放在 detail，不能只显示 `Execute privileged tool bash`
 
 **核心约束再强调**：`core/` 的任何文件都不读配置。配置在 `agent/session.ts` 装配时以构造参数传下去。违反这条，`core/` 就不再可单测。
@@ -693,6 +703,11 @@ loop 以 `aborted` 结束并输出完整 span 树，再次执行 `ps` 时 Node�
 node bin/agent.js "删除 /tmp/test.txt"
 # 弹出确认提示 → 输入 n → 工具返回"用户拒绝执行" → 模型收到并调整策略
 ```
+
+**完成情况**：配置按“默认值 < JSON 文件 < 环境变量 < CLI flag”合并；provider 选择、
+会话恢复、compact、telemetry、工具依赖和 Interaction 全部由 `AgentSession` 装配。CLI 的
+readline 实现只位于 `app/cli/`。权限请求与结论同时作为 `UIEvent` 发出，拒绝则转换为
+`toolResult(isError: true)` 并保留原 `toolCallId`，模型在下一轮上下文中可见。
 
 ---
 
@@ -797,11 +812,11 @@ node bin/agent.js --provider lmstudio --model qwen3.6-27b "在这个仓库里加
 | `AdmissionController` | M1 | 默认 `{ ok: true }`，可配置拒绝 | 读探针判断 | M10 |
 | `ResourceProbe` | M1 | 返回固定值 | `vm_stat` / `powermetrics` | M10 |
 | `Sandbox` | M3 | `passthrough` 直接执行 | `sandbox-exec` | M9 |
-| `PermissionPolicy` | M3 | 默认 `allow`，可配置拒绝 | 触发 `Interaction` | M7 |
+| `PermissionPolicy` | M3 | 默认 `allow`，可配置拒绝 | 触发 `Interaction`（已接入） | M7 |
 | `SpanExporter` | M6 | 打到 stderr | Laminar | M11 |
 | `CompactPolicy` 的 resource 输入 | M5 | `undefined` | 接入探针快照 | M10 |
 | 工具调用形态 | M3 | 仅原生 tool calling | 验证本地服务的原生 tool calling 兼容性 | M11 |
-| `Interaction` | M1 | CLI 自动拒绝 | TUI 弹窗 | M7 / M8 |
+| `Interaction` | M1 | 非交互自动拒绝 | CLI readline 确认（已接入）/ TUI 弹窗 | M7 / TUI 阶段 |
 
 **桩的两条纪律**
 

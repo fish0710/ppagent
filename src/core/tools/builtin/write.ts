@@ -17,6 +17,9 @@ export const writeTool: Tool = {
   },
   privileged: true,
   concurrencySafe: false,
+  describe(value) {
+    return `Write file ${stringArg(objectArgs(value), 'path')}`;
+  },
   prepareSandbox: (args, ctx, sandbox) =>
     pathSandboxPreparation(args, ctx, sandbox, 'write'),
   async execute(value, ctx) {

@@ -244,9 +244,18 @@ async function runTool(
 }
 
 function permissionRequest(tool: Tool, args: unknown): PermissionRequest {
+  let summary = `Execute privileged tool ${tool.name}`;
+  if (tool.describe !== undefined) {
+    try {
+      const described = tool.describe(args).trim();
+      if (described.length > 0) summary = described;
+    } catch {
+      // 权限摘要失败不能绕过权限检查；退回保守模板。
+    }
+  }
   return {
     toolName: tool.name,
-    summary: `Execute privileged tool ${tool.name}`,
+    summary,
     detail: safeStringify(args),
   };
 }

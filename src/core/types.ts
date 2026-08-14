@@ -300,6 +300,8 @@ export interface ToolDef {
 }
 
 export interface Tool extends ToolDef {
+  /** 面向人的一行权限摘要；不得返回完整文件内容等大字段。 */
+  describe?(args: unknown): string;
   /**
    * 在真正执行前应用沙箱策略，并可把参数转换为沙箱准备后的内部形态。
    * read/write/edit 在这里检查绝对路径；bash 在这里取得包装后的命令。

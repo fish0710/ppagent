@@ -19,6 +19,9 @@ export const editTool: Tool = {
   },
   privileged: true,
   concurrencySafe: false,
+  describe(value) {
+    return `Edit file ${stringArg(objectArgs(value), 'path')}`;
+  },
   prepareSandbox: (args, ctx, sandbox) =>
     pathSandboxPreparation(args, ctx, sandbox, 'write'),
   async execute(value, ctx) {

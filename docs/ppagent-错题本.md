@@ -1,4 +1,4 @@
-# ppagent 开发错题本 · M0–M6
+# ppagent 开发错题本 · M0–M7
 
 ### 1.1 Message 用类继承而非判别联合
 
@@ -197,5 +197,31 @@ Span 不复用 UIEvent，也不记录提示词、工具参数和输出正文。U
 
 **修法**：单元测试记录后台子进程 PID；端到端再运行 `sleep 300 & sleep 300`，取消前用 `ps`
 确认 shell 和两个 sleep 共享独立 PGID，Ctrl+C 后按原 PID 逐一确认不存在。
+
+---
+
+### 7.1 配置解析不能渗进 core
+
+**风险**：让 provider、loop 或工具在执行时直接读取环境变量/配置文件，测试会依赖宿主机状态，
+同一个 core 组件也无法被 CLI、TUI、RPC 用不同配置复用。
+
+**修法**：`agent/config/` 负责文件、环境变量、CLI flag 的解析与优先级合并，输出普通对象；
+`AgentSession` 再把各段值作为构造参数注入 core。dependency-cruiser 持续禁止 `core → agent/app`
+反向依赖。custom 的 endpoint 和 key 使用 `PPAGENT_CUSTOM_*` 独立命名，切换 provider 不会误发
+OpenAI 凭证。合并时 provider id 发生变化还必须清空上一配置域的 model/endpoint/credential，
+不能用普通的逐字段深合并让旧 key 残留。
+
+### 7.2 人工拒绝也是模型可观察的工具结果
+
+**风险**：应用层弹框后直接抛异常或终止 loop，模型不知道动作为什么没发生，也无法改用只读、
+询问用户或放弃修改等策略。
+
+**修法**：权限策略只通过注入的 `Interaction.confirm()` 取得决定；拒绝在工具执行层转换成
+`toolResult(isError: true)`，保留 `toolCallId/toolName` 后加入上下文。`AgentSession` 额外发出
+`permission_request` / `permission_resolved` UIEvent，UI 展示与模型消息流各自完整。确认摘要使用
+`Tool.describe(args)`，bash 首行直接显示具体命令，完整参数留在 detail。
+
+CLI 的 readline 只在一次问答期间存活，回答后立即关闭。否则 terminal 模式会继续接管 Ctrl+C，
+进程级 SIGINT handler 收不到取消信号，长工具只能等自己的 timeout；这会破坏 M6 已打通的取消链。
 
 ---

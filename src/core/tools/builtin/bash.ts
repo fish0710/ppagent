@@ -21,6 +21,9 @@ export const bashTool: Tool = {
   },
   privileged: true,
   concurrencySafe: false,
+  describe(value) {
+    return stringArg(objectArgs(value), 'cmd');
+  },
   prepareSandbox(value, ctx, sandbox) {
     const args = objectArgs(value);
     const wrapped = sandbox.wrapCommand(stringArg(args, 'cmd'), ctx.cwd);

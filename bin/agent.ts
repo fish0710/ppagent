@@ -9,18 +9,11 @@ import {
   textTurn,
   toolCallTurn,
   type Context,
+  type FauxTurn,
   type ModelRef,
   type Provider,
 } from '../dist/core/llm/index.js';
-import {
-  StructuralSummarizer,
-  ThresholdCompactPolicy,
-  O200kTokenCounter,
-} from '../dist/core/context/index.js';
-import {
-  runAgentLoop,
-  type AgentLoopPersistence,
-} from '../dist/core/loop/index.js';
+import type { AgentLoopPersistence } from '../dist/core/loop/index.js';
 import {
   JsonlStore,
   latestCompaction,
@@ -29,10 +22,18 @@ import {
 import {
   ConsoleSpanExporter,
   createTraceContext,
-  flushSpanExporter,
 } from '../dist/core/telemetry/index.js';
+import {
+  loadAgentConfig,
+  type AgentConfigSource,
+} from '../dist/agent/config/index.js';
+import { createConfiguredProvider } from '../dist/agent/provider/index.js';
+import { createAgentSession } from '../dist/agent/session.js';
 import { StubAdmissionController } from '../dist/agent/admission/index.js';
-import { StubPermissionPolicy } from '../dist/agent/permissions/index.js';
+import {
+  InteractivePermissionPolicy,
+} from '../dist/agent/permissions/index.js';
+import { CliInteraction } from '../dist/app/cli/index.js';
 import { PassthroughSandbox } from '../dist/core/sandbox/index.js';
 import {
   createBuiltinToolRegistry,
@@ -40,7 +41,6 @@ import {
 } from '../dist/core/tools/index.js';
 import type {
   CompactResult,
-  Interaction,
   Message,
   StoreRecord,
   ToolContext,
@@ -64,9 +64,13 @@ interface ToolArgs {
   arguments: unknown;
 }
 
-interface AgentArgs extends SmokeArgs {
-  maxTurns: number;
+interface AgentArgs {
+  provider?: string;
+  model?: string;
+  prompt: string;
+  maxTurns?: number;
   maxTokens?: number;
+  configPath?: string;
   session?: string;
   resume: boolean;
   trace: boolean;
@@ -80,7 +84,7 @@ function printHelp(): void {
   process.stdout.write(`Usage:
   agent --version
   agent [--provider faux|anthropic|openai|custom] [--model MODEL] [--max-turns N]
-        [--max-tokens N] [--session ID] [--resume] [--trace] PROMPT
+        [--config PATH] [--max-tokens N] [--session ID] [--resume] [--trace] PROMPT
   agent --smoke [--provider faux|anthropic|openai|custom] [--model MODEL] [PROMPT]
   agent --tool read|write|edit|bash [--args JSON]
 
@@ -158,70 +162,50 @@ async function runSmoke(smokeArgs: SmokeArgs): Promise<void> {
 }
 
 async function runAgent(args: AgentArgs): Promise<void> {
-  const { provider, model } = createAgentProvider(args);
-  const session = await prepareSession(args, model);
-  const tokenCounter = new O200kTokenCounter();
-  const contextWindow = args.maxTokens ?? model.contextWindow;
+  const config = await loadAgentConfig({
+    ...(args.configPath === undefined ? {} : { filePath: args.configPath }),
+    env: process.env,
+    cli: cliConfigSource(args),
+  });
+  const { provider, model } = createConfiguredProvider(config.provider, {
+    fauxTurns: fauxAgentTurns(args.prompt),
+  });
+  const stored = await prepareSession(args, model);
   const spanExporter = args.trace ? new ConsoleSpanExporter() : undefined;
-  const controller = new AbortController();
+  const interaction = new CliInteraction();
+  const session = createAgentSession({
+    config,
+    provider,
+    model,
+    cwd: process.cwd(),
+    interaction,
+    context: stored.context,
+    ...(stored.previousSummary === undefined
+      ? {}
+      : { previousSummary: stored.previousSummary }),
+    ...(stored.persistence === undefined
+      ? {}
+      : { persistence: stored.persistence }),
+    ...(spanExporter === undefined
+      ? {}
+      : { telemetry: { exporter: spanExporter } }),
+  });
   const onInterrupt = (): void => {
-    controller.abort(new Error('Interrupted by user'));
+    session.abort(new Error('Interrupted by user'));
   };
   process.once('SIGINT', onInterrupt);
   let wroteText = false;
+  const unsubscribe = session.subscribe((event) => {
+    wroteText = renderAgentEvent(event) || wroteText;
+  });
   try {
-    const result = await runAgentLoop({
-      provider,
-      model,
-      context: session.context,
-      registry: createBuiltinToolRegistry(),
-      toolContext: {
-        signal: controller.signal,
-        cwd: process.cwd(),
-        trace: createTraceContext(),
-        interaction: nonInteractiveInteraction(),
-      },
-      toolDeps: {
-        admission: new StubAdmissionController(),
-        permissions: new StubPermissionPolicy(),
-        sandbox: new PassthroughSandbox(),
-      },
-      toolOptions: { maxResultChars: 8_000, toolTimeoutMs: 30_000 },
-      loopConfig: { maxTurns: args.maxTurns, turnTimeoutMs: 120_000 },
-      maxToolConcurrency: 4,
-      compaction: {
-        tokenCounter,
-        policy: new ThresholdCompactPolicy({
-          config: {
-            compactThreshold: 0.8,
-            memPressureThreshold: 0.75,
-            keepRecentMessages: 6,
-          },
-          tokenCounter,
-        }),
-        summarizer: new StructuralSummarizer({ tokenCounter }),
-        contextWindow,
-        targetTokens: Math.max(1, Math.floor(contextWindow * 0.4)),
-        ...(session.previousSummary === undefined
-          ? {}
-          : { previousSummary: session.previousSummary }),
-      },
-      ...(session.persistence === undefined
-        ? {}
-        : { persistence: session.persistence }),
-      ...(spanExporter === undefined
-        ? {}
-        : { telemetry: { exporter: spanExporter } }),
-      emit(event) {
-        wroteText = renderAgentEvent(event) || wroteText;
-      },
-    });
+    const result = await session.prompt(args.prompt);
     if (wroteText) process.stdout.write('\n');
     if (result.reason !== 'stop') process.exitCode = 1;
   } finally {
-    // 监听器清理不能排在可能失败的异步旁路之后。
     process.removeListener('SIGINT', onInterrupt);
-    await flushSpanExporter(spanExporter);
+    unsubscribe();
+    interaction.close();
   }
 }
 
@@ -235,13 +219,8 @@ async function prepareSession(
   args: AgentArgs,
   model: ModelRef,
 ): Promise<PreparedSession> {
-  const userMessage: Message = {
-    role: 'user',
-    content: args.prompt,
-    timestamp: Date.now(),
-  };
   if (args.session === undefined) {
-    return { context: { messages: [userMessage] } };
+    return { context: { messages: [] } };
   }
   const sessionId = args.session;
 
@@ -264,13 +243,6 @@ async function prepareSession(
     records.reduce((highest, record) => Math.max(highest, record.seq), 0) + 1;
   const previous = latestCompaction(records)?.summary;
   const messages = args.resume ? replay(records, 'compacted') : [];
-  await store.append(sessionId, {
-    kind: 'message',
-    seq: nextSequence,
-    message: userMessage,
-  });
-  nextSequence += 1;
-  messages.push(userMessage);
 
   const persistence: AgentLoopPersistence = {
     async appendMessages(newMessages) {
@@ -341,30 +313,35 @@ function renderAgentEvent(event: UIEvent): boolean {
 
 async function runTool(args: ToolArgs): Promise<void> {
   const controller = new AbortController();
+  const interaction = new CliInteraction();
   const context: ToolContext = {
     signal: controller.signal,
     cwd: process.cwd(),
     trace: createTraceContext(),
-    interaction: nonInteractiveInteraction(),
+    interaction,
   };
-  const result = await executeToolCall(
-    createBuiltinToolRegistry(),
-    {
-      type: 'toolCall',
-      id: 'cli-tool-call',
-      name: args.name,
-      arguments: args.arguments,
-    },
-    context,
-    {
-      admission: new StubAdmissionController(),
-      permissions: new StubPermissionPolicy(),
-      sandbox: new PassthroughSandbox(),
-    },
-    { maxResultChars: 8_000, toolTimeoutMs: 30_000 },
-  );
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  if (result.isError) process.exitCode = 1;
+  try {
+    const result = await executeToolCall(
+      createBuiltinToolRegistry(),
+      {
+        type: 'toolCall',
+        id: 'cli-tool-call',
+        name: args.name,
+        arguments: args.arguments,
+      },
+      context,
+      {
+        admission: new StubAdmissionController(),
+        permissions: new InteractivePermissionPolicy(),
+        sandbox: new PassthroughSandbox(),
+      },
+      { maxResultChars: 8_000, toolTimeoutMs: 30_000 },
+    );
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (result.isError) process.exitCode = 1;
+  } finally {
+    interaction.close();
+  }
 }
 
 function parseSmokeArgs(args: string[]): SmokeArgs {
@@ -396,10 +373,11 @@ function parseSmokeArgs(args: string[]): SmokeArgs {
 }
 
 function parseAgentArgs(args: string[]): AgentArgs {
-  let provider = 'faux';
+  let provider: string | undefined;
   let model: string | undefined;
-  let maxTurns = 8;
+  let maxTurns: number | undefined;
   let maxTokens: number | undefined;
+  let configPath: string | undefined;
   let session: string | undefined;
   let resume = false;
   let trace = false;
@@ -420,7 +398,8 @@ function parseAgentArgs(args: string[]): AgentArgs {
       arg === '--model' ||
       arg === '--max-turns' ||
       arg === '--max-tokens' ||
-      arg === '--session'
+      arg === '--session' ||
+      arg === '--config'
     ) {
       const value = args[index + 1];
       if (value === undefined || value.startsWith('-')) {
@@ -432,6 +411,8 @@ function parseAgentArgs(args: string[]): AgentArgs {
         maxTurns = positiveInteger(value, '--max-turns');
       } else if (arg === '--max-tokens') {
         maxTokens = positiveInteger(value, '--max-tokens');
+      } else if (arg === '--config') {
+        configPath = value;
       } else {
         session = value;
       }
@@ -447,14 +428,36 @@ function parseAgentArgs(args: string[]): AgentArgs {
     throw new Error('--resume requires --session ID');
   }
   return {
-    provider,
+    ...(provider === undefined ? {} : { provider }),
     ...(model === undefined ? {} : { model }),
     prompt,
-    maxTurns,
+    ...(maxTurns === undefined ? {} : { maxTurns }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(configPath === undefined ? {} : { configPath }),
     ...(session === undefined ? {} : { session }),
     resume,
     trace,
+  };
+}
+
+function cliConfigSource(args: AgentArgs): AgentConfigSource {
+  return {
+    ...(
+      args.provider === undefined && args.model === undefined
+        ? {}
+        : {
+            provider: {
+              ...(args.provider === undefined ? {} : { id: args.provider }),
+              ...(args.model === undefined ? {} : { model: args.model }),
+            },
+          }
+    ),
+    ...(args.maxTurns === undefined
+      ? {}
+      : { loop: { maxTurns: args.maxTurns } }),
+    ...(args.maxTokens === undefined
+      ? {}
+      : { context: { contextWindow: args.maxTokens } }),
   };
 }
 
@@ -558,42 +561,46 @@ function createSmokeProvider(args: SmokeArgs): {
   throw new Error(`Unsupported smoke provider: ${args.provider}`);
 }
 
-function createAgentProvider(args: AgentArgs): {
-  provider: Provider;
-  model: ModelRef;
-} {
-  if (args.provider !== 'faux') return createSmokeProvider(args);
-  const isCancellationAcceptance = /\bsleep\s+300\b/iu.test(args.prompt);
-  const provider = new FauxProvider({
-    turns: isCancellationAcceptance
-      ? [
-          toolCallTurn({
-            id: `faux-bash-cancel-${crypto.randomUUID()}`,
-            name: 'bash',
-            // 同时包含前台与后台 sleep，端到端覆盖 shell 的孙进程清理。
-            rawArguments: JSON.stringify({ cmd: 'sleep 300 & sleep 300' }),
-            argumentChunkSize: 1,
-          }),
-          textTurn('The sleep command finished.'),
-        ]
-      : [
-          toolCallTurn({
-            // session 恢复后历史仍在上下文里；跨进程也必须保持 toolCallId 唯一。
-            id: `faux-read-package-${crypto.randomUUID()}`,
-            name: 'read',
-            rawArguments: '{"path":"package.json"}',
-            argumentChunkSize: 1,
-          }),
-          textTurn(
-            'package.json declares runtime dependencies on @earendil-works/pi-ai and gpt-tokenizer.',
-            { chunkSize: 8 },
-          ),
-        ],
-  });
-  return {
-    provider,
-    model: selectModel(provider, 'faux', args.model ?? 'faux-model'),
-  };
+function fauxAgentTurns(prompt: string): FauxTurn[] {
+  if (/\bsleep\s+300\b/iu.test(prompt)) {
+    return [
+      toolCallTurn({
+        id: `faux-bash-cancel-${crypto.randomUUID()}`,
+        name: 'bash',
+        // 同时包含前台与后台 sleep，端到端覆盖 shell 的孙进程清理。
+        rawArguments: JSON.stringify({ cmd: 'sleep 300 & sleep 300' }),
+        argumentChunkSize: 1,
+      }),
+      textTurn('The sleep command finished.'),
+    ];
+  }
+  if (/删除\s*\/tmp\/test\.txt/iu.test(prompt)) {
+    return [
+      toolCallTurn({
+        id: `faux-delete-test-${crypto.randomUUID()}`,
+        name: 'bash',
+        rawArguments: JSON.stringify({ cmd: 'rm -f /tmp/test.txt' }),
+        argumentChunkSize: 1,
+      }),
+      textTurn(
+        'The file was not deleted because permission was denied. I will leave it unchanged.',
+        { chunkSize: 8 },
+      ),
+    ];
+  }
+  return [
+    toolCallTurn({
+      // session 恢复后历史仍在上下文里；跨进程也必须保持 toolCallId 唯一。
+      id: `faux-read-package-${crypto.randomUUID()}`,
+      name: 'read',
+      rawArguments: '{"path":"package.json"}',
+      argumentChunkSize: 1,
+    }),
+    textTurn(
+      'package.json declares runtime dependencies on @earendil-works/pi-ai and gpt-tokenizer.',
+      { chunkSize: 8 },
+    ),
+  ];
 }
 
 function selectModel(provider: Provider, providerId: string, id: string): ModelRef {
@@ -616,17 +623,6 @@ function positiveInteger(value: string, option: string): number {
     throw new Error(`${option} must be a positive integer`);
   }
   return parsed;
-}
-
-function nonInteractiveInteraction(): Interaction {
-  return {
-    confirm: async () => false,
-    ask: async () => null,
-    select: async () => null,
-    notify: ({ level, message }) => {
-      process.stderr.write(`[${level}] ${message}\n`);
-    },
-  };
 }
 
 void main().catch((error: unknown) => {
