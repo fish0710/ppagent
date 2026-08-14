@@ -388,7 +388,7 @@
 <header class="topbar">
   <div class="wrap topbar__inner">
     <a class="wordmark" href="#top"><b>ppagent</b><span> / 开发中</span></a>
-    <span class="status">M5 完成 · 上下文可压缩、会话可恢复</span>
+    <span class="status">M6 完成 · 步骤可观测、取消无残留</span>
   </div>
 </header>
 
@@ -537,8 +537,8 @@
         <div class="ms ms--done"><span class="ms__id">M3</span><p class="ms__name">工具注册与执行链</p><span class="ms__state">完成</span></div>
         <div class="ms ms--done"><span class="ms__id">M4</span><p class="ms__name">agent loop</p><span class="ms__state">完成</span></div>
         <div class="ms ms--done"><span class="ms__id">M5</span><p class="ms__name">上下文压缩与会话持久化</p><span class="ms__state">完成</span></div>
-        <div class="ms ms--next"><span class="ms__id">M6</span><p class="ms__name">可观测性与取消</p><span class="ms__state">下一步</span></div>
-        <div class="ms ms--todo"><span class="ms__id">M7</span><p class="ms__name">装配层与人工确认通道</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--done"><span class="ms__id">M6</span><p class="ms__name">可观测性与取消</p><span class="ms__state">完成</span></div>
+        <div class="ms ms--next"><span class="ms__id">M7</span><p class="ms__name">装配层与人工确认通道</p><span class="ms__state">下一步</span></div>
         <div class="ms ms--todo"><span class="ms__id">M8</span><p class="ms__name">命令行入口</p><span class="ms__state">待开始</span></div>
         <div class="ms ms--todo"><span class="ms__id">M9</span><p class="ms__name">macOS 沙箱隔离</p><span class="ms__state">待开始</span></div>
         <div class="ms ms--todo"><span class="ms__id">M10</span><p class="ms__name">资源探针与准入控制</p><span class="ms__state">待开始</span></div>
@@ -564,6 +564,7 @@
             <li>模型调用适配器、可脚本化测试 provider，以及带四关门禁的工具执行层</li>
             <li>可流式重组工具参数、执行工具并继续推理的 ReAct agent loop</li>
             <li>BPE token 计账、安全边界压缩，以及可恢复的 append-only JSONL 会话</li>
+            <li>loop/model/tool 层级 span，以及能清理整个 bash 进程组的取消链</li>
             <li>每个里程碑的验收命令与桩替换清单</li>
           </ul>
         </div>

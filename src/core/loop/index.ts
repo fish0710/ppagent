@@ -9,12 +9,15 @@ import type {
   Provider,
   ReadonlyContext,
   ResourceSnapshot,
+  SpanExporter,
+  StopReason,
   Summarizer,
   TokenCounter,
   ToolContext,
   UIEvent,
 } from '../types.js';
 import { ContextManager } from '../context/manager.js';
+import { SpanRecorder } from '../telemetry/span.js';
 import type {
   ToolExecutorDeps,
   ToolExecutorOptions,
@@ -39,8 +42,14 @@ export interface AgentLoopOptions {
   compaction?: AgentLoopCompactionOptions;
   /** loop 只搬运变更，不认识具体 Store 实现。 */
   persistence?: AgentLoopPersistence;
+  telemetry?: AgentLoopTelemetryOptions;
   /** UIEvent 是严格有序的同步出口；不提供时仍可把 loop 当普通函数使用。 */
   emit?: (event: UIEvent) => void;
+}
+
+export interface AgentLoopTelemetryOptions {
+  exporter: SpanExporter;
+  now?: () => number;
 }
 
 export interface AgentLoopCompactionOptions {
@@ -78,6 +87,14 @@ export async function runAgentLoop(
   validateOptions(options);
   const emit = options.emit ?? (() => undefined);
   const signal = options.toolContext.signal;
+  const spans =
+    options.telemetry === undefined
+      ? undefined
+      : new SpanRecorder(options.telemetry.exporter, {
+          ...(options.telemetry.now === undefined
+            ? {}
+            : { now: options.telemetry.now }),
+        });
   const definitions = options.registry.definitions();
   // registry 才是本轮可执行工具的事实来源，丢弃调用方可能遗留的旧 tools。
   const { tools: _previousTools, ...contextWithoutTools } = options.context;
@@ -103,8 +120,17 @@ export async function runAgentLoop(
     else contextManager.append(...messages);
     await options.persistence?.appendMessages(messages);
   };
+  const loopSpan = spans?.start('agent.loop', options.toolContext.trace, {
+    'model.provider': options.model.provider,
+    'model.id': options.model.id,
+    'agent.max_turns': options.loopConfig.maxTurns,
+  });
+  let completedReason: LoopEndReason | undefined;
+  let completedTurns = 0;
   // 所有正常出口都走 finish，保证每次运行恰好产生一个 loop_end。
   const finish = (reason: LoopEndReason, turns: number): AgentLoopResult => {
+    completedReason = reason;
+    completedTurns = turns;
     emit({ type: 'loop_end', reason, turns });
     return {
       context: contextManager?.snapshot() ?? initialContext,
@@ -113,9 +139,10 @@ export async function runAgentLoop(
     };
   };
 
-  if (signal.aborted) return finish('aborted', 0);
+  try {
+    if (signal.aborted) return finish('aborted', 0);
 
-  for (let turn = 1; turn <= options.loopConfig.maxTurns; turn += 1) {
+    for (let turn = 1; turn <= options.loopConfig.maxTurns; turn += 1) {
     if (signal.aborted) return finish('aborted', turn - 1);
     emit({ type: 'turn_start', turn });
     // 单轮控制器同时包住模型生成和随后的工具执行；超时不是只限制 HTTP。
@@ -124,22 +151,46 @@ export async function runAgentLoop(
       options.loopConfig.turnTimeoutMs,
       turn,
     );
+    const turnTrace = options.toolContext.trace.child(`turn:${turn}`);
+    const turnSpan = spans?.start('agent.turn', turnTrace, {
+      'agent.turn': turn,
+    });
+    let turnStopReason: StopReason | undefined;
+    let turnFailure: string | undefined;
     try {
       if (contextManager !== undefined && options.compaction !== undefined) {
-        const compacted = await contextManager.compactIfNeeded({
-          policy: options.compaction.policy,
-          summarizer: options.compaction.summarizer,
-          contextWindow:
-            options.compaction.contextWindow ?? options.model.contextWindow,
-          signal: control.signal,
-          trace: options.toolContext.trace.child(`compact-turn-${turn}`),
-          ...(options.compaction.resource === undefined
-            ? {}
-            : { resource: options.compaction.resource }),
-          ...(options.compaction.targetTokens === undefined
-            ? {}
-            : { targetTokens: options.compaction.targetTokens }),
-        });
+        const compactTrace = turnTrace.child('compact');
+        const compactSpan = spans?.start('context.compact', compactTrace);
+        let compacted: CompactResult | null;
+        try {
+          compacted = await contextManager.compactIfNeeded({
+            policy: options.compaction.policy,
+            summarizer: options.compaction.summarizer,
+            contextWindow:
+              options.compaction.contextWindow ?? options.model.contextWindow,
+            signal: control.signal,
+            trace: compactTrace,
+            ...(options.compaction.resource === undefined
+              ? {}
+              : { resource: options.compaction.resource }),
+            ...(options.compaction.targetTokens === undefined
+              ? {}
+              : { targetTokens: options.compaction.targetTokens }),
+          });
+          compactSpan?.end(
+            compacted === null
+              ? { 'context.compacted': false }
+              : {
+                  'context.compacted': true,
+                  'context.trigger': compacted.trigger,
+                  'context.tokens_before': compacted.tokensBefore,
+                  'context.tokens_after': compacted.tokensAfter,
+                },
+          );
+        } catch (error) {
+          compactSpan?.end({}, error);
+          throw error;
+        }
         if (compacted !== null) {
           // compaction 记录先落盘，再让模型消费新视图；恢复时不会看到半次压缩。
           await options.persistence?.appendCompaction(compacted);
@@ -151,13 +202,36 @@ export async function runAgentLoop(
           });
         }
       }
-      const generated = await runReactTurn({
-        provider: options.provider,
-        model: options.model,
-        context,
-        signal: control.signal,
-        emit,
+      const modelTrace = turnTrace.child('model');
+      const modelSpan = spans?.start('model.stream', modelTrace, {
+        'model.provider': options.model.provider,
+        'model.id': options.model.id,
       });
+      let generated: Awaited<ReturnType<typeof runReactTurn>>;
+      try {
+        generated = await runReactTurn({
+          provider: options.provider,
+          model: options.model,
+          context,
+          signal: control.signal,
+          emit,
+        });
+        modelSpan?.end(
+          {
+            'model.stop_reason': generated.message.stopReason,
+            'model.input_tokens': generated.message.usage.input,
+            'model.output_tokens': generated.message.usage.output,
+            'model.tool_calls': generated.toolCalls.length,
+          },
+          generated.terminal === 'error'
+            ? generated.message.errorMessage ?? 'Model call failed.'
+            : undefined,
+        );
+      } catch (error) {
+        modelSpan?.end({}, error);
+        throw error;
+      }
+      turnStopReason = generated.message.stopReason;
       // 先落 assistant 消息再发 turn_end，订阅者看到事件时内存状态已经一致。
       await appendMessages(generated.message);
       emit({
@@ -170,9 +244,10 @@ export async function runAgentLoop(
       // 根取消优先于单轮超时：用户主动取消不应被展示成 timeout。
       if (signal.aborted) return finish('aborted', turn);
       if (control.timedOut()) {
+        turnFailure = `Agent turn ${turn} timed out after ${options.loopConfig.turnTimeoutMs} ms.`;
         emit({
           type: 'error',
-          message: `Agent turn ${turn} timed out after ${options.loopConfig.turnTimeoutMs} ms.`,
+          message: turnFailure,
         });
         return finish('error', turn);
       }
@@ -185,10 +260,12 @@ export async function runAgentLoop(
           type: 'error',
           message: generated.message.errorMessage ?? 'Model call failed.',
         });
+        turnFailure = generated.message.errorMessage ?? 'Model call failed.';
         return finish('error', turn);
       }
       // 文本化工具调用是配置错误，不能把它当普通 stop 静默结束。
       if (generated.diagnostic !== undefined) {
+        turnFailure = generated.diagnostic;
         emit({ type: 'error', message: generated.diagnostic });
         return finish('error', turn);
       }
@@ -199,10 +276,15 @@ export async function runAgentLoop(
           generated.toolCalls,
           {
             registry: options.registry,
-            context: { ...options.toolContext, signal: control.signal },
+            context: {
+              ...options.toolContext,
+              signal: control.signal,
+              trace: turnTrace,
+            },
             deps: options.toolDeps,
             options: options.toolOptions,
             maxConcurrency: options.maxToolConcurrency ?? 4,
+            ...(spans === undefined ? {} : { spans }),
             emit,
           },
         );
@@ -210,9 +292,10 @@ export async function runAgentLoop(
         await appendMessages(...results);
         if (signal.aborted) return finish('aborted', turn);
         if (control.timedOut()) {
+          turnFailure = `Agent turn ${turn} timed out after ${options.loopConfig.turnTimeoutMs} ms.`;
           emit({
             type: 'error',
-            message: `Agent turn ${turn} timed out after ${options.loopConfig.turnTimeoutMs} ms.`,
+            message: turnFailure,
           });
           return finish('error', turn);
         }
@@ -230,26 +313,30 @@ export async function runAgentLoop(
         case 'aborted':
           return finish('aborted', turn);
         case 'length':
+          turnFailure = 'Model response reached its output token limit.';
           emit({
             type: 'error',
-            message: 'Model response reached its output token limit.',
+            message: turnFailure,
           });
           return finish('error', turn);
         case 'toolUse':
+          turnFailure = 'Model reported toolUse without a complete native tool call.';
           emit({
             type: 'error',
-            message: 'Model reported toolUse without a complete native tool call.',
+            message: turnFailure,
           });
           return finish('error', turn);
         case 'error':
+          turnFailure = generated.message.errorMessage ?? 'Model call failed.';
           emit({
             type: 'error',
-            message: generated.message.errorMessage ?? 'Model call failed.',
+            message: turnFailure,
           });
           return finish('error', turn);
       }
     } catch (error) {
       if (signal.aborted) return finish('aborted', turn);
+      turnFailure = errorMessage(error);
       emit({
         type: 'error',
         message: `Agent loop failed: ${errorMessage(error)}`,
@@ -258,11 +345,31 @@ export async function runAgentLoop(
     } finally {
       // 清理根 signal 监听器与 timer；任何 return 都不能绕过。
       control.dispose();
+      turnSpan?.end(
+        {
+          ...(turnStopReason === undefined
+            ? {}
+            : { 'agent.stop_reason': turnStopReason }),
+          'agent.timed_out': control.timedOut(),
+          'agent.aborted': signal.aborted || turnStopReason === 'aborted',
+        },
+        turnFailure,
+      );
     }
-  }
+    }
 
-  // for 的上限已经在工具继续分支显式返回；保留为不可达防线。
-  return finish('maxTurns', options.loopConfig.maxTurns);
+    // for 的上限已经在工具继续分支显式返回；保留为不可达防线。
+    return finish('maxTurns', options.loopConfig.maxTurns);
+  } finally {
+    loopSpan?.end(
+      {
+        'agent.reason': completedReason ?? 'error',
+        'agent.turns': completedTurns,
+        'agent.aborted': completedReason === 'aborted' || signal.aborted,
+      },
+      completedReason === 'error' ? 'Agent loop ended with an error.' : undefined,
+    );
+  }
 }
 
 function errorMessage(error: unknown): string {

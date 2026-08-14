@@ -14,6 +14,10 @@ import {
 } from '../src/core/llm/faux.js';
 import { runAgentLoop, type AgentLoopOptions } from '../src/core/loop/index.js';
 import { PassthroughSandbox } from '../src/core/sandbox/passthrough.js';
+import {
+  InMemorySpanExporter,
+  createTraceContext,
+} from '../src/core/telemetry/index.js';
 import type {
   Interaction,
   Message,
@@ -96,13 +100,20 @@ describe('agent loop', () => {
 
   it('emits an explicit aborted termination when the user cancels', async () => {
     const controller = new AbortController();
+    const exporter = new InMemorySpanExporter();
     const provider = new FauxProvider({
       turns: [textTurn('too slow', { delayMs: 100 })],
     });
     const events: UIEvent[] = [];
-    const execution = runAgentLoop(
-      loopOptions(provider, new ToolRegistry([probeTool()]), events, controller),
-    );
+    const execution = runAgentLoop({
+      ...loopOptions(
+        provider,
+        new ToolRegistry([probeTool()]),
+        events,
+        controller,
+      ),
+      telemetry: { exporter },
+    });
     setTimeout(() => controller.abort(new Error('cancelled by test')), 5);
 
     const result = await execution;
@@ -119,6 +130,14 @@ describe('agent loop', () => {
       reason: 'aborted',
       turns: 1,
     });
+    expect(exporter.spans.map((span) => span.name).sort()).toEqual([
+      'agent.loop',
+      'agent.turn',
+      'model.stream',
+    ]);
+    expect(
+      exporter.spans.find((span) => span.name === 'model.stream')?.error,
+    ).toContain('aborted');
   });
 
   it.each([
@@ -300,6 +319,106 @@ describe('agent loop', () => {
     expect(persistedMessages).toHaveLength(1);
     expect(persistedMessages[0]?.[0]).toMatchObject({ role: 'assistant' });
   });
+
+  it('exports parented turn, model, and tool spans', async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = new FauxProvider({
+      turns: [
+        toolCallTurn({ name: 'probe', rawArguments: '{"value":"x"}' }),
+        textTurn('done'),
+      ],
+    });
+    const events: UIEvent[] = [];
+    const options = loopOptions(
+      provider,
+      new ToolRegistry([probeTool()]),
+      events,
+    );
+    options.toolContext.trace = createTraceContext({
+      traceId: 'trace',
+      spanId: 'root',
+    });
+
+    const result = await runAgentLoop({
+      ...options,
+      telemetry: { exporter },
+    });
+
+    expect(result.reason).toBe('stop');
+    const spans = exporter.spans;
+    expect(spans.filter((span) => span.name === 'agent.loop')).toHaveLength(1);
+    expect(spans.filter((span) => span.name === 'agent.turn')).toHaveLength(2);
+    expect(spans.filter((span) => span.name === 'model.stream')).toHaveLength(2);
+    expect(spans.filter((span) => span.name === 'tool.execute')).toHaveLength(1);
+    const toolSpan = spans.find((span) => span.name === 'tool.execute');
+    const firstTurn = spans.find(
+      (span) => span.name === 'agent.turn' && span.attrs['agent.turn'] === 1,
+    );
+    const loopSpan = spans.find((span) => span.name === 'agent.loop');
+    expect(firstTurn?.parentSpanId).toBe(loopSpan?.spanId);
+    expect(toolSpan?.parentSpanId).toBe(firstTurn?.spanId);
+    expect(toolSpan?.attrs).toMatchObject({
+      'tool.name': 'probe',
+      'tool.is_error': false,
+    });
+    expect(
+      spans.find(
+        (span) =>
+          span.name === 'model.stream' &&
+          span.attrs['model.stop_reason'] === 'stop',
+      )?.attrs,
+    ).toMatchObject({ 'model.provider': 'faux' });
+  });
+
+  it('cancels multiple concurrent tools and closes their spans', async () => {
+    const exporter = new InMemorySpanExporter();
+    const controller = new AbortController();
+    let started = 0;
+    const hanging: Tool = {
+      ...namedTool('hanging', true, () => undefined),
+      async execute(_args, ctx) {
+        started += 1;
+        await new Promise<void>((resolve) => {
+          if (ctx.signal.aborted) resolve();
+          else ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return textOutput('cancelled work');
+      },
+    };
+    const provider = new FauxProvider({
+      turns: [
+        toolCallsTurn({
+          calls: [
+            { name: 'hanging', rawArguments: '{"value":"one"}' },
+            { name: 'hanging', rawArguments: '{"value":"two"}' },
+          ],
+        }),
+      ],
+    });
+    const events: UIEvent[] = [];
+    const execution = runAgentLoop({
+      ...loopOptions(
+        provider,
+        new ToolRegistry([hanging]),
+        events,
+        controller,
+      ),
+      telemetry: { exporter },
+    });
+    await waitUntil(() => started === 2);
+    controller.abort(new Error('cancel all tools'));
+
+    const result = await execution;
+
+    expect(result.reason).toBe('aborted');
+    expect(events.filter((event) => event.type === 'tool_end')).toHaveLength(2);
+    const toolSpans = exporter.spans.filter((span) => span.name === 'tool.execute');
+    expect(toolSpans).toHaveLength(2);
+    expect(toolSpans.every((span) => span.attrs['tool.is_error'] === true)).toBe(true);
+    expect(
+      exporter.spans.find((span) => span.name === 'agent.turn')?.attrs,
+    ).toMatchObject({ 'agent.aborted': true });
+  });
 });
 
 function loopOptions(
@@ -379,4 +498,12 @@ const INTERACTION: Interaction = {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
+    await delay(5);
+  }
 }

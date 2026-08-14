@@ -562,7 +562,7 @@ node bin/agent.js --tool read --args '{"path":'                       # raw stri
 | 上下文管理 | 消息数组无脑追加，不压缩 |
 | 持久化 | 不落盘 |
 | tracing | M4 只发完整 UIEvent；Span 在 M6 接入 |
-| cancellation | AbortSignal 传入模型流和工具；M6 再补完整取消可观测性 |
+| cancellation | AbortSignal 传入模型流和工具；M6 已补完整取消可观测性与端到端验收 |
 
 **验收**
 ```bash
@@ -631,13 +631,21 @@ compaction 的累积摘要及其后消息；`full` 投影忽略 compaction，供
 
 **目标**：能看见每一步耗时，Ctrl+C 能干净停下。
 
+**开发计划（已完成）**
+1. 实现带正确 `parentSpanId` 的 `createTraceContext` 和幂等 `SpanRecorder`；exporter 抛错不得改变 agent 主流程。
+2. 建立 `agent.loop → agent.turn → context.compact / model.stream / tool.execute` 层级，错误、超时和取消也必须在 `finally` 中闭合 span。
+3. 实现缓冲式 console exporter：子 span 即使先结束，也在 `flush()` 时按父子关系重建树；增加 in-memory exporter 供独立测试。
+4. 保持 Span 与 UIEvent 两个出口独立；span 只记录 provider、model、tool 名称、调用 ID、token、耗时和状态，不记录提示词、工具参数与输出正文。
+5. 覆盖模型流取消、多个并发工具取消、bash 后台孙进程取消；最后用真实 CLI SIGINT 和 `ps` 做端到端验收。
+
 **交付**
 - `core/telemetry/span.ts` —— Span 类型 + `SpanExporter` 接口
 - `core/telemetry/console.ts` —— 桩 exporter，打到 stderr
+- `core/telemetry/memory.ts` —— 测试用 exporter
 - loop 中统一注入 `TraceContext`：每轮一个 span，模型调用、每个工具调用各一个子 span
 - `AbortSignal` 从 loop 一路传到 provider 的 HTTP 请求和 bash 工具的子进程
 
-**桩**：`SpanExporter` 只有 console 实现。M11 接 Laminar 时新增一个实现即可。
+**桩**：运行时使用 console 实现，测试使用 in-memory 实现。M11 接 Laminar 时新增 exporter 即可。
 
 **必测的取消场景**
 1. 模型正在流式输出时 Ctrl+C
@@ -651,6 +659,9 @@ node bin/agent.js "跑 sleep 300"             # Ctrl+C 后 ps 里没有残留的
 ```
 
 **要点**：孤儿进程是这一步最容易漏的。bash 工具要用进程组（`detached: true` + `process.kill(-pid)`），单独 kill 子进程杀不掉它自己起的孙子进程。
+
+**端到端实测**：取消前 `/bin/sh` 与两个 `sleep 300` 共享独立 PGID；向 CLI 发送 Ctrl+C 后，
+loop 以 `aborted` 结束并输出完整 span 树，再次执行 `ps` 时 Node、shell 与两个 sleep PID 均不存在。
 
 ---
 

@@ -1,4 +1,4 @@
-# ppagent 开发错题本 · M0–M5
+# ppagent 开发错题本 · M0–M6
 
 ### 1.1 Message 用类继承而非判别联合
 
@@ -170,5 +170,28 @@ M5 用安全边界、连续两次压缩、两种 replay 投影和无收益压缩
 `snapshot()` 返回独立结果。`previousSummary` 同样返回副本，避免另一条引用泄漏路径。
 
 这是编译期安全边界，不是对不可信 JavaScript 插件的运行时隔离；后者若进入支持范围，需要再加冻结或结构化克隆。
+
+---
+
+### 6.1 span 的完成顺序不是树的展示顺序
+
+**风险**：子 span 总是在父 span 之前结束。如果 console exporter 收到一个就立即按当前状态打印，
+此时还不知道父节点是否稍后到达，最终只能得到扁平日志或错误缩进。
+
+**修法**：`export()` 只缓冲完整 span，`flush()` 再按 `parentSpanId` 建树并排序输出。所有正常、
+错误和取消出口由幂等 `ActiveSpan.end()` 收口；exporter 自身抛错必须被隔离，不能把成功任务改成失败。
+
+Span 不复用 UIEvent，也不记录提示词、工具参数和输出正文。UIEvent 保证实时、完整、有序；Span
+允许缓冲和采样，只保存诊断所需的受控结构化元数据。
+
+---
+
+### 6.2 取消必须验进程组，不能只验 Promise 返回
+
+**风险**：工具结果显示 `Tool execution aborted.` 只证明 JavaScript Promise 已返回，不证明 shell
+启动的孙进程已经退出。后台服务仍可能被 PID 1 收养并继续占用端口。
+
+**修法**：单元测试记录后台子进程 PID；端到端再运行 `sleep 300 & sleep 300`，取消前用 `ps`
+确认 shell 和两个 sleep 共享独立 PGID，Ctrl+C 后按原 PID 逐一确认不存在。
 
 ---

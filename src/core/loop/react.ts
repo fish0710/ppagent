@@ -9,6 +9,7 @@ import type {
   UIEvent,
 } from '../types.js';
 import { createErrorMessage, modelOrigin } from '../llm/provider.js';
+import type { SpanRecorder } from '../telemetry/span.js';
 import type {
   ToolExecutorDeps,
   ToolExecutorOptions,
@@ -39,6 +40,7 @@ export interface ReactToolOptions {
   deps: ToolExecutorDeps;
   options: ToolExecutorOptions;
   maxConcurrency: number;
+  spans?: SpanRecorder;
   emit: (event: UIEvent) => void;
 }
 
@@ -175,6 +177,11 @@ async function executeOne(
   call: ToolCallBlock,
   react: ReactToolOptions,
 ): Promise<ToolResultMessage> {
+  const toolTrace = react.context.trace.child(`tool:${call.id}`);
+  const span = react.spans?.start('tool.execute', toolTrace, {
+    'tool.name': call.name,
+    'tool.call_id': call.id,
+  });
   // tool_start/tool_end 包住完整四关执行链，而不只是 Tool.execute。
   react.emit({
     type: 'tool_start',
@@ -182,13 +189,24 @@ async function executeOne(
     name: call.name,
     args: call.arguments,
   });
-  const result = await executeToolCall(
-    react.registry,
-    call,
-    react.context,
-    react.deps,
-    react.options,
-  );
+  let result: ToolResultMessage;
+  try {
+    result = await executeToolCall(
+      react.registry,
+      call,
+      { ...react.context, trace: toolTrace },
+      react.deps,
+      react.options,
+    );
+    span?.end({
+      'tool.is_error': result.isError,
+      'tool.duration_ms': result.durationMs ?? 0,
+      'tool.truncated': result.truncated === true,
+    });
+  } catch (error) {
+    span?.end({}, error);
+    throw error;
+  }
   react.emit({
     type: 'tool_end',
     id: call.id,

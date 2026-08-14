@@ -16,9 +16,10 @@
 - M3：工具注册、四关执行链与 read/write/edit/bash 已完成
 - M4：流式 ReAct agent loop、工具调度与显式终止事件已完成
 - M5：BPE token 计账、安全上下文压缩、JSONL 会话持久化与 replay 已完成
+- M6：层级 span、console exporter 与端到端干净取消已完成
 - 其余里程碑见[在线介绍页](https://fish0710.github.io/ppagent/#roadmap)
 
-目前已有可运行的 M5 开发验收入口，但还没有可安装的发行版本；真实权限策略与 macOS
+目前已有可运行的 M6 开发验收入口，但还没有可安装的发行版本；真实权限策略与 macOS
 沙箱仍属于后续里程碑。
 
 ## 本地开发
@@ -63,6 +64,18 @@ node bin/agent.js --session compact-demo --max-tokens 2000 "一个长任务"
 会话以 append-only JSONL 保存在当前工作目录的 `.ppagent/sessions/`。`--resume` 默认使用
 最近一次压缩后的投影；压缩前的原始消息仍保留在 JSONL 中。`--max-tokens` 是 M5 的上下文
 窗口验收覆盖值，便于在短任务里触发 `[context:compacted]` 事件。
+
+### 验证 tracing 与取消
+
+```bash
+node bin/agent.js --trace "读取 package.json"
+node bin/agent.js --trace "跑 sleep 300"   # 工具开始后按 Ctrl+C
+ps -ax -o pid,ppid,pgid,command | grep 'sleep 300'
+```
+
+`--trace` 在 stderr 输出 `agent.loop → agent.turn → context.compact / model.stream /
+tool.execute` 层级及耗时。取消验收的 faux 分支会执行一个包含后台孙进程的
+`sleep 300 & sleep 300`；Ctrl+C 后整个进程组都应消失。
 
 ### 验证本地 OpenAI-compatible 服务
 
