@@ -228,12 +228,13 @@ CLI 的 readline 只在一次问答期间存活，回答后立即关闭。否则
 
 ### 8.1 JSONL 的 stdout 必须是纯协议通道
 
-**风险**：把工具进度、warn、trace 或结尾换行提示混进 JSON stdout，Harbor 这类调用方会在
+**风险**：把工具进度文本、trace 或结尾换行提示混进 JSON stdout，Harbor 这类调用方会在
 解析某一行时随机失败。只保证“主要结果是 JSON”不够，必须保证每个非空 stdout 行都可独立解析。
 
 **修法**：print 与 JSON 使用两个 renderer。JSON renderer 对每个 UIEvent 只执行一次序列化并
-追加换行；权限自动拒绝说明、trace 和人类诊断只写 stderr。JSONL 不额外套 envelope，直接保持
-UIEvent 的判别联合形状，`type` 是消费方的稳定分流字段。
+追加换行；trace 和非事件诊断只写 stderr。权限自动拒绝说明属于 `notify` UIEvent：JSON 模式写
+stdout，print 模式写 stderr。JSONL 不额外套 envelope，直接保持 UIEvent 的判别联合形状，
+`type` 是消费方的稳定分流字段。
 
 ### 8.2 非交互拒绝是预期策略，不是异常兜底
 
@@ -241,7 +242,15 @@ UIEvent 的判别联合形状，`type` 是消费方的稳定分流字段。
 benchmark 也无法区分“策略拒绝”和“交互设施坏了”。
 
 **修法**：管道输入和 JSON 模式显式选择 `NonInteractiveInteraction`。`confirm` 主动返回 false，
-同时 notify warn，说明自动拒绝的具体命令。模型仍通过 `toolResult(isError: true)` 得知拒绝，应用层
-通过 permission/tool UIEvent 得知结构化原因，stderr 则给人和任务日志提供直接线索。
+同时 notify warn，说明自动拒绝的具体命令。模型仍通过 `toolResult(isError: true)` 得知拒绝；
+JSON 消费方仅靠 stdout 就能看到 permission、notify 和 tool 事件，print 模式则把 warn 留在 stderr。
+
+### 8.3 循环检测必须只看当前祖先路径
+
+**风险**：序列化时只增不减的 WeakSet 会把“两个兄弟字段共享同一个对象”误判为循环引用，导致
+第二处被替换成 `[Circular]`，改变工具参数的含义。
+
+**修法**：维护当前 JSON 访问路径的祖先栈。进入兄弟字段前弹出已离开的分支；只有待序列化对象
+仍存在于当前祖先路径时才标记 `[Circular]`。测试同时覆盖共享引用和 `obj.self = obj`。
 
 ---

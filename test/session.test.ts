@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mergeAgentConfig } from '../src/agent/config/index.js';
 import { createAgentSession } from '../src/agent/session.js';
+import { NonInteractiveInteraction } from '../src/app/cli/index.js';
 import {
   FauxProvider,
   textTurn,
@@ -48,14 +49,10 @@ describe('AgentSession', () => {
     const provider = recordingProvider(faux, seenContexts);
     const model = provider.listModels()[0];
     if (model === undefined) throw new Error('Missing faux model');
-    const confirm = vi.fn(async () => false);
-    const interaction: Interaction = {
-      confirm,
-      ask: async () => null,
-      select: async () => null,
-      notify: () => undefined,
-    };
     const events: UIEvent[] = [];
+    const interaction = new NonInteractiveInteraction((event) => {
+      events.push({ type: 'notify', ...event });
+    });
     const session = createAgentSession({
       config: mergeAgentConfig({ provider: { id: 'faux' } }),
       provider,
@@ -69,10 +66,6 @@ describe('AgentSession', () => {
 
     expect(result.reason).toBe('stop');
     await expect(access(target)).resolves.toBeUndefined();
-    expect(confirm).toHaveBeenCalledWith({
-      message: command,
-      detail: JSON.stringify({ cmd: command }),
-    });
     expect(events).toContainEqual({
       type: 'permission_resolved',
       decision: 'deny',
@@ -84,6 +77,28 @@ describe('AgentSession', () => {
           event.req.summary === command,
       ),
     ).toBe(true);
+    expect(
+      events
+        .filter((event) =>
+          [
+            'permission_request',
+            'notify',
+            'permission_resolved',
+            'tool_end',
+          ].includes(event.type),
+        )
+        .map((event) => event.type),
+    ).toEqual([
+      'permission_request',
+      'notify',
+      'permission_resolved',
+      'tool_end',
+    ]);
+    expect(events).toContainEqual({
+      type: 'notify',
+      level: 'warn',
+      message: `Non-interactive mode automatically denied permission: ${command}`,
+    });
 
     const secondTurn = seenContexts[1];
     expect(secondTurn).toBeDefined();

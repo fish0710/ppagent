@@ -52,6 +52,9 @@ export class PrintCliEventRenderer implements CliEventRenderer {
       case 'error':
         this.#stderr.write(`\n${event.message}\n`);
         break;
+      case 'notify':
+        this.#stderr.write(`[${event.level}] ${event.message}\n`);
+        break;
       case 'compacted':
         this.#stderr.write(
           `\n[context:compacted] ${event.trigger} ${event.tokensBefore} → ${event.tokensAfter} tokens\n`,
@@ -244,13 +247,24 @@ function hasTty(stream: object): boolean {
 }
 
 function safeJson(value: unknown): string {
-  const ancestors = new WeakSet<object>();
+  const ancestors: object[] = [];
   try {
-    return JSON.stringify(value, (_key, entry: unknown) => {
+    return JSON.stringify(value, function (
+      this: object,
+      _key,
+      entry: unknown,
+    ) {
       if (typeof entry === 'bigint') return entry.toString();
       if (typeof entry !== 'object' || entry === null) return entry;
-      if (ancestors.has(entry)) return '[Circular]';
-      ancestors.add(entry);
+      // 只保留当前访问路径：兄弟字段共享引用不是循环，不能误标。
+      while (
+        ancestors.length > 0 &&
+        ancestors.at(-1) !== this
+      ) {
+        ancestors.pop();
+      }
+      if (ancestors.includes(entry)) return '[Circular]';
+      ancestors.push(entry);
       return entry;
     });
   } catch {

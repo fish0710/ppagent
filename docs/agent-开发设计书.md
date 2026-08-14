@@ -342,7 +342,7 @@ export interface Interaction {
     message: string;
     options?: string[];
   }): Promise<string>;
-  notify(e: { type: 'info' | 'warn' | 'error'; message: string }): void;
+  notify(e: { level: 'info' | 'warn' | 'error'; message: string }): void;
 }
 
 // ============ 上下文压缩 ============
@@ -393,6 +393,7 @@ export type UIEvent =
   | { type: 'tool_end'; id: ToolCallId; name: string; isError: boolean; preview: string; durationMs: number }
   | { type: 'permission_request'; req: PermissionRequest }
   | { type: 'permission_resolved'; decision: PermissionDecision }
+  | { type: 'notify'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'admission_denied'; reason: string; retryAfterMs: number | null }
   | { type: 'compacted'; trigger: CompactTrigger; tokensBefore: number; tokensAfter: number }
   | { type: 'turn_end'; turn: number; usage: Usage; stopReason: StopReason }
@@ -718,8 +719,8 @@ readline 实现只位于 `app/cli/`。权限请求与结论同时作为 `UIEvent
 **开发计划**
 1. 把 UIEvent 输出从 `bin/agent.ts` 提取为 print / JSONL 两个独立 renderer。
 2. 支持位置参数和 stdin 两种 prompt 来源，TTY 缺省输入时明确报错而不是挂起。
-3. JSON 模式固定为 stdout 每行一个完整 UIEvent，不混入提示、warn 或 tracing 文本。
-4. 非交互模式使用显式 Interaction，权限请求自动拒绝并在 stderr 记录 warn。
+3. JSON 模式固定为 stdout 每行一个完整 UIEvent，不混入非事件提示或 tracing 文本。
+4. 非交互模式使用显式 Interaction，权限请求自动拒绝；JSON 输出 `notify:warn`，print 写 stderr。
 5. 增加 renderer、stdin、拒绝日志测试，并运行 Harbor 风格管道验收。
 
 以上五步均已完成。
@@ -737,9 +738,15 @@ echo "统计 src 下有多少个 ts 文件" | node bin/agent.js --json | jq -r '
 ```
 
 **完成情况**：默认 print 模式保持正文 stdout、工具与诊断 stderr；`--json` 的 stdout 只包含
-JSONL UIEvent。stdin prompt 和 `--json` 都切换到非交互 Interaction，权限拒绝会在 stderr
-留下 warn，同时通过正常的 `permission_request → permission_resolved:deny → tool_end` 事件链
-进入 JSONL。CLI 仍通过 AgentSession 运行，不复制 loop 或权限逻辑。
+JSONL UIEvent。stdin prompt 和 `--json` 都切换到非交互 Interaction，权限拒绝通过
+`permission_request → notify:warn → permission_resolved:deny → tool_end` 完整进入 JSONL。
+CLI 仍通过 AgentSession 运行，不复制 loop 或权限逻辑。
+
+**评审补丁计划（已完成）**
+1. 给 `UIEvent` 增加结构化 `notify`，在冻结 M8 JSONL 协议前补齐通知通道。
+2. 非交互 Interaction 的通知只交给当前 renderer：JSON 写 stdout，print 写 stderr，避免重复。
+3. 把 `safeJson` 的全局 WeakSet 改为祖先栈，共享兄弟引用不再被误判为循环。
+4. 用集成测试固定拒绝事件顺序，并分别覆盖共享引用与真正循环引用。
 
 ---
 

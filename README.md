@@ -65,9 +65,10 @@ echo "统计 src 下有多少个 ts 文件" | node bin/agent.js --json \
   | jq -r 'select(.type=="text_delta").delta'
 ```
 
-JSON 模式和管道输入都使用明确的非交互 `Interaction`。权限确认会自动拒绝，并在 stderr
-写入一条 warn；stdout 仍保持纯 JSONL，同时包含 `permission_request`、
-`permission_resolved` 和失败的 `tool_end`，方便 benchmark 判断失败原因。
+JSON 模式和管道输入都使用明确的非交互 `Interaction`。权限确认会自动拒绝；JSON 模式把
+可读说明作为结构化 `notify:warn` 写入 stdout，print 模式则写入 stderr。JSONL 同时包含
+`permission_request`、`permission_resolved` 和失败的 `tool_end`，benchmark 无需合并 stderr
+即可还原拒绝原因与完整过程。
 
 ### 验证配置与人工确认
 

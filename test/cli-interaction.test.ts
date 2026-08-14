@@ -73,6 +73,11 @@ describe('CLI interaction', () => {
     });
     renderer.render({ type: 'text_delta', delta: 'hello' });
     renderer.render({ type: 'text_delta', delta: ' world' });
+    renderer.render({
+      type: 'notify',
+      level: 'warn',
+      message: 'permission denied',
+    });
     renderer.render({ type: 'loop_end', reason: 'stop', turns: 1 });
     renderer.finish();
 
@@ -80,6 +85,7 @@ describe('CLI interaction', () => {
     expect(stderr.text()).toContain(
       '[tool:start] read {"path":"README.md"}',
     );
+    expect(stderr.text()).toContain('[warn] permission denied');
   });
 
   it('renders exactly one complete UIEvent per JSON line', () => {
@@ -88,6 +94,7 @@ describe('CLI interaction', () => {
     const events: UIEvent[] = [
       { type: 'turn_start', turn: 1 },
       { type: 'text_delta', delta: 'ok' },
+      { type: 'notify', level: 'warn', message: 'automatic denial' },
       {
         type: 'turn_end',
         turn: 1,
@@ -103,6 +110,35 @@ describe('CLI interaction', () => {
     const lines = output.text().trimEnd().split('\n');
     expect(lines).toHaveLength(events.length);
     expect(lines.map((line) => JSON.parse(line) as UIEvent)).toEqual(events);
+  });
+
+  it('distinguishes a shared reference from an ancestor cycle', () => {
+    const output = captureStream();
+    const renderer = createCliEventRenderer('json', { stdout: output.stream });
+    const shared = { enabled: true };
+    const cyclic: { self?: unknown } = {};
+    cyclic.self = cyclic;
+
+    renderer.render({
+      type: 'tool_start',
+      id: 'shared',
+      name: 'probe',
+      args: { left: shared, right: shared },
+    });
+    renderer.render({
+      type: 'tool_start',
+      id: 'cyclic',
+      name: 'probe',
+      args: cyclic,
+    });
+
+    const [sharedLine, cyclicLine] = output.text().trimEnd().split('\n');
+    expect(JSON.parse(sharedLine ?? '')).toMatchObject({
+      args: { left: { enabled: true }, right: { enabled: true } },
+    });
+    expect(JSON.parse(cyclicLine ?? '')).toMatchObject({
+      args: { self: '[Circular]' },
+    });
   });
 
   it('reads and trims a prompt from stdin', async () => {

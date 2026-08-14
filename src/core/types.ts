@@ -696,6 +696,8 @@ export type UIEvent =
     }
   | { type: 'permission_request'; req: PermissionRequest }
   | { type: 'permission_resolved'; decision: PermissionDecision }
+  /** Interaction 的人类可读通知；JSON CLI 也必须能在单一事件流中还原。 */
+  | { type: 'notify'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'admission_denied'; reason: string; retryAfterMs: number | null }
   | {
       type: 'compacted';

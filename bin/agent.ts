@@ -179,8 +179,10 @@ async function runAgent(args: AgentArgs): Promise<void> {
   });
   const stored = await prepareSession(args, model);
   const spanExporter = args.trace ? new ConsoleSpanExporter() : undefined;
-  const interaction = createAgentInteraction(args.json);
   const renderer = createCliEventRenderer(args.json ? 'json' : 'print');
+  const interaction = createAgentInteraction(args.json, (event) => {
+    renderer.render({ type: 'notify', ...event });
+  });
   const session = createAgentSession({
     config,
     provider,
@@ -427,13 +429,21 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
   };
 }
 
-function createAgentInteraction(forceNonInteractive: boolean) {
+function createAgentInteraction(
+  forceNonInteractive: boolean,
+  notify?: (event: {
+    level: 'info' | 'warn' | 'error';
+    message: string;
+  }) => void,
+) {
   if (
     forceNonInteractive ||
     process.stdin.isTTY !== true ||
     process.stderr.isTTY !== true
   ) {
-    return new NonInteractiveInteraction();
+    return notify === undefined
+      ? new NonInteractiveInteraction()
+      : new NonInteractiveInteraction(notify);
   }
   return new CliInteraction();
 }
