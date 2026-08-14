@@ -25,15 +25,18 @@ import {
 } from '../dist/core/telemetry/index.js';
 import {
   loadAgentConfig,
-  type AgentConfigSource,
-} from '../dist/agent/config/index.js';
-import { createConfiguredProvider } from '../dist/agent/provider/index.js';
-import { createAgentSession } from '../dist/agent/session.js';
-import { StubAdmissionController } from '../dist/agent/admission/index.js';
-import {
+  createConfiguredProvider,
+  createAgentSession,
+  StubAdmissionController,
   InteractivePermissionPolicy,
-} from '../dist/agent/permissions/index.js';
-import { CliInteraction } from '../dist/app/cli/index.js';
+  type AgentConfigSource,
+} from '../dist/agent/index.js';
+import {
+  CliInteraction,
+  NonInteractiveInteraction,
+  createCliEventRenderer,
+  readCliInput,
+} from '../dist/app/cli/index.js';
 import { PassthroughSandbox } from '../dist/core/sandbox/index.js';
 import {
   createBuiltinToolRegistry,
@@ -44,7 +47,6 @@ import type {
   Message,
   StoreRecord,
   ToolContext,
-  UIEvent,
 } from '../dist/core/types.js';
 import { readCustomSmokeEnvironment } from './smoke-env.js';
 
@@ -74,6 +76,7 @@ interface AgentArgs {
   session?: string;
   resume: boolean;
   trace: boolean;
+  json: boolean;
 }
 
 function printVersion(): void {
@@ -84,13 +87,17 @@ function printHelp(): void {
   process.stdout.write(`Usage:
   agent --version
   agent [--provider faux|anthropic|openai|custom] [--model MODEL] [--max-turns N]
-        [--config PATH] [--max-tokens N] [--session ID] [--resume] [--trace] PROMPT
+        [--config PATH] [--max-tokens N] [--session ID] [--resume] [--trace]
+        [--json] [PROMPT]
   agent --smoke [--provider faux|anthropic|openai|custom] [--model MODEL] [PROMPT]
   agent --tool read|write|edit|bash [--args JSON]
 
 Custom provider environment:
   PPAGENT_CUSTOM_BASE_URL  OpenAI-compatible API root, usually ending in /v1
   PPAGENT_CUSTOM_API_KEY   Optional; omit it for services without authentication
+
+Input/output:
+  With no PROMPT, read it from stdin. --json writes one UIEvent per stdout line.
 `);
 }
 
@@ -112,7 +119,7 @@ async function main(): Promise<void> {
     await runSmoke(parseSmokeArgs(args));
     return;
   }
-  await runAgent(parseAgentArgs(args));
+  await runAgent(await parseAgentArgs(args));
 }
 
 async function runSmoke(smokeArgs: SmokeArgs): Promise<void> {
@@ -172,7 +179,8 @@ async function runAgent(args: AgentArgs): Promise<void> {
   });
   const stored = await prepareSession(args, model);
   const spanExporter = args.trace ? new ConsoleSpanExporter() : undefined;
-  const interaction = new CliInteraction();
+  const interaction = createAgentInteraction(args.json);
+  const renderer = createCliEventRenderer(args.json ? 'json' : 'print');
   const session = createAgentSession({
     config,
     provider,
@@ -194,18 +202,17 @@ async function runAgent(args: AgentArgs): Promise<void> {
     session.abort(new Error('Interrupted by user'));
   };
   process.once('SIGINT', onInterrupt);
-  let wroteText = false;
   const unsubscribe = session.subscribe((event) => {
-    wroteText = renderAgentEvent(event) || wroteText;
+    renderer.render(event);
   });
   try {
     const result = await session.prompt(args.prompt);
-    if (wroteText) process.stdout.write('\n');
     if (result.reason !== 'stop') process.exitCode = 1;
   } finally {
+    renderer.finish();
     process.removeListener('SIGINT', onInterrupt);
     unsubscribe();
-    interaction.close();
+    if (interaction instanceof CliInteraction) interaction.close();
   }
 }
 
@@ -277,43 +284,9 @@ async function prepareSession(
   };
 }
 
-function renderAgentEvent(event: UIEvent): boolean {
-  switch (event.type) {
-    case 'text_delta':
-      process.stdout.write(event.delta);
-      return event.delta.length > 0;
-    case 'tool_start':
-      process.stderr.write(
-        `\n[tool:start] ${event.name} ${JSON.stringify(event.args)}\n`,
-      );
-      return false;
-    case 'tool_end':
-      process.stderr.write(
-        `[tool:end] ${event.name} ${event.isError ? 'error' : 'ok'}: ${event.preview}\n`,
-      );
-      return false;
-    case 'error':
-      process.stderr.write(`\n${event.message}\n`);
-      return false;
-    case 'compacted':
-      process.stderr.write(
-        `\n[context:compacted] ${event.trigger} ${event.tokensBefore} → ${event.tokensAfter} tokens\n`,
-      );
-      return false;
-    case 'turn_start':
-    case 'thinking_delta':
-    case 'permission_request':
-    case 'permission_resolved':
-    case 'admission_denied':
-    case 'turn_end':
-    case 'loop_end':
-      return false;
-  }
-}
-
 async function runTool(args: ToolArgs): Promise<void> {
   const controller = new AbortController();
-  const interaction = new CliInteraction();
+  const interaction = createAgentInteraction(false);
   const context: ToolContext = {
     signal: controller.signal,
     cwd: process.cwd(),
@@ -340,7 +313,7 @@ async function runTool(args: ToolArgs): Promise<void> {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (result.isError) process.exitCode = 1;
   } finally {
-    interaction.close();
+    if (interaction instanceof CliInteraction) interaction.close();
   }
 }
 
@@ -372,7 +345,7 @@ function parseSmokeArgs(args: string[]): SmokeArgs {
   };
 }
 
-function parseAgentArgs(args: string[]): AgentArgs {
+async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
   let provider: string | undefined;
   let model: string | undefined;
   let maxTurns: number | undefined;
@@ -381,6 +354,7 @@ function parseAgentArgs(args: string[]): AgentArgs {
   let session: string | undefined;
   let resume = false;
   let trace = false;
+  let json = false;
   const promptParts: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -391,6 +365,10 @@ function parseAgentArgs(args: string[]): AgentArgs {
     }
     if (arg === '--trace') {
       trace = true;
+      continue;
+    }
+    if (arg === '--json') {
+      json = true;
       continue;
     }
     if (
@@ -422,8 +400,16 @@ function parseAgentArgs(args: string[]): AgentArgs {
     if (arg.startsWith('-')) throw new Error(`Unknown option: ${arg}`);
     promptParts.push(arg);
   }
-  const prompt = promptParts.join(' ').trim();
-  if (prompt.length === 0) throw new Error('A prompt is required');
+  let prompt = promptParts.join(' ').trim();
+  if (prompt.length === 0) {
+    if (process.stdin.isTTY === true) {
+      throw new Error('A prompt is required (argument or stdin)');
+    }
+    prompt = await readCliInput(process.stdin);
+  }
+  if (prompt.length === 0) {
+    throw new Error('A prompt is required (argument or stdin)');
+  }
   if (resume && session === undefined) {
     throw new Error('--resume requires --session ID');
   }
@@ -437,7 +423,19 @@ function parseAgentArgs(args: string[]): AgentArgs {
     ...(session === undefined ? {} : { session }),
     resume,
     trace,
+    json,
   };
+}
+
+function createAgentInteraction(forceNonInteractive: boolean) {
+  if (
+    forceNonInteractive ||
+    process.stdin.isTTY !== true ||
+    process.stderr.isTTY !== true
+  ) {
+    return new NonInteractiveInteraction();
+  }
+  return new CliInteraction();
 }
 
 function cliConfigSource(args: AgentArgs): AgentConfigSource {

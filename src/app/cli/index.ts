@@ -1,5 +1,103 @@
 import { createInterface, type Interface } from 'node:readline/promises';
-import type { Interaction } from '../../core/types.js';
+import type { Interaction, UIEvent } from '../../core/types.js';
+
+export type CliOutputMode = 'print' | 'json';
+
+export interface CliEventRenderer {
+  render(event: UIEvent): void;
+  finish(): void;
+}
+
+export interface CliRendererOptions {
+  stdout?: NodeJS.WritableStream;
+  stderr?: NodeJS.WritableStream;
+}
+
+/** 创建 M8 的稳定输出协议；JSON 模式的 stdout 不混入人类可读日志。 */
+export function createCliEventRenderer(
+  mode: CliOutputMode,
+  options: CliRendererOptions = {},
+): CliEventRenderer {
+  return mode === 'json'
+    ? new JsonCliEventRenderer(options.stdout)
+    : new PrintCliEventRenderer(options);
+}
+
+export class PrintCliEventRenderer implements CliEventRenderer {
+  readonly #stdout: NodeJS.WritableStream;
+  readonly #stderr: NodeJS.WritableStream;
+  #wroteText = false;
+
+  constructor(options: CliRendererOptions = {}) {
+    this.#stdout = options.stdout ?? process.stdout;
+    this.#stderr = options.stderr ?? process.stderr;
+  }
+
+  render(event: UIEvent): void {
+    switch (event.type) {
+      case 'text_delta':
+        this.#stdout.write(event.delta);
+        this.#wroteText ||= event.delta.length > 0;
+        break;
+      case 'tool_start':
+        this.#stderr.write(
+          `\n[tool:start] ${event.name} ${safeJson(event.args)}\n`,
+        );
+        break;
+      case 'tool_end':
+        this.#stderr.write(
+          `[tool:end] ${event.name} ${event.isError ? 'error' : 'ok'}: ${event.preview}\n`,
+        );
+        break;
+      case 'error':
+        this.#stderr.write(`\n${event.message}\n`);
+        break;
+      case 'compacted':
+        this.#stderr.write(
+          `\n[context:compacted] ${event.trigger} ${event.tokensBefore} → ${event.tokensAfter} tokens\n`,
+        );
+        break;
+      case 'turn_start':
+      case 'thinking_delta':
+      case 'permission_request':
+      case 'permission_resolved':
+      case 'admission_denied':
+      case 'turn_end':
+      case 'loop_end':
+        break;
+    }
+  }
+
+  finish(): void {
+    if (this.#wroteText) this.#stdout.write('\n');
+    this.#wroteText = false;
+  }
+}
+
+export class JsonCliEventRenderer implements CliEventRenderer {
+  readonly #stdout: NodeJS.WritableStream;
+
+  constructor(stdout: NodeJS.WritableStream = process.stdout) {
+    this.#stdout = stdout;
+  }
+
+  render(event: UIEvent): void {
+    this.#stdout.write(`${safeJson(event)}\n`);
+  }
+
+  finish(): void {}
+}
+
+/** 读取管道输入；调用方负责在 TTY 时拒绝缺省 prompt，避免无限等待。 */
+export async function readCliInput(
+  input: NodeJS.ReadableStream = process.stdin,
+): Promise<string> {
+  let text = '';
+  for await (const chunk of input as AsyncIterable<string | Buffer>) {
+    text += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+  }
+  return text.trim();
+}
 
 export interface CliInteractionOptions {
   input?: NodeJS.ReadableStream;
@@ -108,12 +206,20 @@ export class NonInteractiveInteraction implements Interaction {
     notify: (event: {
       level: 'info' | 'warn' | 'error';
       message: string;
-    }) => void = () => undefined,
+    }) => void = ({ level, message }) => {
+      process.stderr.write(`[${level}] ${message}\n`);
+    },
   ) {
     this.#notify = notify;
   }
 
-  async confirm(_request: Parameters<Interaction['confirm']>[0]): Promise<boolean> {
+  async confirm(
+    request: Parameters<Interaction['confirm']>[0],
+  ): Promise<boolean> {
+    this.notify({
+      level: 'warn',
+      message: `Non-interactive mode automatically denied permission: ${request.message}`,
+    });
     return false;
   }
 
@@ -135,4 +241,22 @@ export class NonInteractiveInteraction implements Interaction {
 
 function hasTty(stream: object): boolean {
   return 'isTTY' in stream && stream.isTTY === true;
+}
+
+function safeJson(value: unknown): string {
+  const ancestors = new WeakSet<object>();
+  try {
+    return JSON.stringify(value, (_key, entry: unknown) => {
+      if (typeof entry === 'bigint') return entry.toString();
+      if (typeof entry !== 'object' || entry === null) return entry;
+      if (ancestors.has(entry)) return '[Circular]';
+      ancestors.add(entry);
+      return entry;
+    });
+  } catch {
+    return JSON.stringify({
+      type: 'error',
+      message: 'CLI could not serialize an event.',
+    });
+  }
 }

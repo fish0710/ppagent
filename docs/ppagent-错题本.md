@@ -1,4 +1,4 @@
-# ppagent 开发错题本 · M0–M7
+# ppagent 开发错题本 · M0–M8
 
 ### 1.1 Message 用类继承而非判别联合
 
@@ -223,5 +223,25 @@ OpenAI 凭证。合并时 provider id 发生变化还必须清空上一配置域
 
 CLI 的 readline 只在一次问答期间存活，回答后立即关闭。否则 terminal 模式会继续接管 Ctrl+C，
 进程级 SIGINT handler 收不到取消信号，长工具只能等自己的 timeout；这会破坏 M6 已打通的取消链。
+
+---
+
+### 8.1 JSONL 的 stdout 必须是纯协议通道
+
+**风险**：把工具进度、warn、trace 或结尾换行提示混进 JSON stdout，Harbor 这类调用方会在
+解析某一行时随机失败。只保证“主要结果是 JSON”不够，必须保证每个非空 stdout 行都可独立解析。
+
+**修法**：print 与 JSON 使用两个 renderer。JSON renderer 对每个 UIEvent 只执行一次序列化并
+追加换行；权限自动拒绝说明、trace 和人类诊断只写 stderr。JSONL 不额外套 envelope，直接保持
+UIEvent 的判别联合形状，`type` 是消费方的稳定分流字段。
+
+### 8.2 非交互拒绝是预期策略，不是异常兜底
+
+**风险**：依赖 TTY/连接异常触发 PermissionPolicy 的 catch 虽然安全，但日志语义会显示成故障，
+benchmark 也无法区分“策略拒绝”和“交互设施坏了”。
+
+**修法**：管道输入和 JSON 模式显式选择 `NonInteractiveInteraction`。`confirm` 主动返回 false，
+同时 notify warn，说明自动拒绝的具体命令。模型仍通过 `toolResult(isError: true)` 得知拒绝，应用层
+通过 permission/tool UIEvent 得知结构化原因，stderr 则给人和任务日志提供直接线索。
 
 ---

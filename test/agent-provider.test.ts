@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createConfiguredProvider } from '../src/agent/provider/index.js';
+import { createConfiguredProvider } from '../src/agent/index.js';
 
 describe('configured provider selection', () => {
   it('selects the faux default without reading ambient configuration', () => {

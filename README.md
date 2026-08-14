@@ -18,10 +18,11 @@
 - M5：BPE token 计账、安全上下文压缩、JSONL 会话持久化与 replay 已完成
 - M6：层级 span、console exporter 与端到端干净取消已完成
 - M7：AgentSession 装配、配置合并与人工确认反向通道已完成
+- M8：print/JSONL CLI、stdin prompt 与非交互安全拒绝已完成
 - 其余里程碑见[在线介绍页](https://fish0710.github.io/ppagent/#roadmap)
 
-目前已有可运行的 M7 开发验收入口，但还没有可安装的发行版本；脚本友好的 JSON CLI 与
-macOS 系统沙箱仍属于后续里程碑。
+目前已有可供脚本调用的 M8 CLI，但还没有可安装的发行版本；macOS 系统沙箱和真实资源
+探针仍属于后续里程碑。
 
 ## 本地开发
 
@@ -52,7 +53,21 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 ```
 
 默认 faux provider 会脚本化地产生一次 `read` 调用，再读取工具结果进入第二轮并完成任务。
-命令行现在通过可复用的 `AgentSession` 装配 core 组件；print / JSON 批处理模式仍归 M8。
+命令行通过可复用的 `AgentSession` 装配 core 组件，默认 print 模式只把模型正文写到 stdout。
+
+### 验证脚本调用与 JSONL
+
+没有位置参数时从 stdin 读取 prompt；`--json` 的 stdout 严格为一行一个完整 `UIEvent`：
+
+```bash
+echo "统计 src 下有多少个 ts 文件" | node bin/agent.js --json
+echo "统计 src 下有多少个 ts 文件" | node bin/agent.js --json \
+  | jq -r 'select(.type=="text_delta").delta'
+```
+
+JSON 模式和管道输入都使用明确的非交互 `Interaction`。权限确认会自动拒绝，并在 stderr
+写入一条 warn；stdout 仍保持纯 JSONL，同时包含 `permission_request`、
+`permission_resolved` 和失败的 `tool_end`，方便 benchmark 判断失败原因。
 
 ### 验证配置与人工确认
 
@@ -73,8 +88,8 @@ node bin/agent.js "删除 /tmp/test.txt"
 ```
 
 配置的文件、环境变量和命令行解析只发生在 `agent/` 装配层；`core/` 不读取这些外部来源。
-特权工具使用真实人工确认策略，非交互环境默认拒绝。当前 `PassthroughSandbox` 仍是 M9
-之前的沙箱桩，因此确认允许的命令只应在可信工作目录中执行。
+特权工具使用真实人工确认策略，非交互环境会明确记录后自动拒绝。当前
+`PassthroughSandbox` 仍是 M9 之前的沙箱桩，因此确认允许的命令只应在可信工作目录中执行。
 
 ### 验证上下文压缩与恢复
 

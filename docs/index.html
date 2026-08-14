@@ -388,7 +388,7 @@
 <header class="topbar">
   <div class="wrap topbar__inner">
     <a class="wordmark" href="#top"><b>ppagent</b><span> / 开发中</span></a>
-    <span class="status">M7 完成 · 装配可复用、人工确认可回传</span>
+    <span class="status">M8 完成 · CLI 可脚本调用、JSONL 协议稳定</span>
   </div>
 </header>
 
@@ -539,8 +539,8 @@
         <div class="ms ms--done"><span class="ms__id">M5</span><p class="ms__name">上下文压缩与会话持久化</p><span class="ms__state">完成</span></div>
         <div class="ms ms--done"><span class="ms__id">M6</span><p class="ms__name">可观测性与取消</p><span class="ms__state">完成</span></div>
         <div class="ms ms--done"><span class="ms__id">M7</span><p class="ms__name">装配层与人工确认通道</p><span class="ms__state">完成</span></div>
-        <div class="ms ms--next"><span class="ms__id">M8</span><p class="ms__name">命令行入口</p><span class="ms__state">下一步</span></div>
-        <div class="ms ms--todo"><span class="ms__id">M9</span><p class="ms__name">macOS 沙箱隔离</p><span class="ms__state">待开始</span></div>
+        <div class="ms ms--done"><span class="ms__id">M8</span><p class="ms__name">命令行入口</p><span class="ms__state">完成</span></div>
+        <div class="ms ms--next"><span class="ms__id">M9</span><p class="ms__name">macOS 沙箱隔离</p><span class="ms__state">下一步</span></div>
         <div class="ms ms--todo"><span class="ms__id">M10</span><p class="ms__name">资源探针与准入控制</p><span class="ms__state">待开始</span></div>
         <div class="ms ms--todo"><span class="ms__id">M11</span><p class="ms__name">本地模型接入与对照评测</p><span class="ms__state">待开始</span></div>
       </div>
@@ -566,13 +566,14 @@
             <li>BPE token 计账、安全边界压缩，以及可恢复的 append-only JSONL 会话</li>
             <li>loop/model/tool 层级 span，以及能清理整个 bash 进程组的取消链</li>
             <li>可复用 AgentSession、分层配置合并，以及能把拒绝回传模型的人工确认通道</li>
+            <li>支持 stdin 的 print / JSONL CLI，以及可记录原因的非交互安全拒绝</li>
             <li>每个里程碑的验收命令与桩替换清单</li>
           </ul>
         </div>
         <div class="honesty honesty--no" style="display:block">
           <h3>还没有</h3>
           <ul>
-            <li>脚本友好的 JSON CLI 与 macOS 系统沙箱</li>
+            <li>macOS 系统沙箱与真实资源探针</li>
             <li>任何评测数据</li>
             <li>可安装的发行版本</li>
           </ul>

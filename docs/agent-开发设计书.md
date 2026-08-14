@@ -715,9 +715,19 @@ readline 实现只位于 `app/cli/`。权限请求与结论同时作为 `UIEvent
 
 **目标**：能被脚本批量调用。
 
+**开发计划**
+1. 把 UIEvent 输出从 `bin/agent.ts` 提取为 print / JSONL 两个独立 renderer。
+2. 支持位置参数和 stdin 两种 prompt 来源，TTY 缺省输入时明确报错而不是挂起。
+3. JSON 模式固定为 stdout 每行一个完整 UIEvent，不混入提示、warn 或 tracing 文本。
+4. 非交互模式使用显式 Interaction，权限请求自动拒绝并在 stderr 记录 warn。
+5. 增加 renderer、stdin、拒绝日志测试，并运行 Harbor 风格管道验收。
+
+以上五步均已完成。
+
 **交付**
 - `app/cli/index.ts` —— print 模式（纯文本）与 JSON 模式（每行一个 UIEvent）
 - `Interaction` 的非交互实现：所有确认请求自动拒绝，并记录到输出
+- `agent/index.ts` —— agent 层公共门面，调用方不依赖 config/provider/session 的内部路径
 
 **为什么 CLI 排在 TUI 前面**：你的评估方案需要 Harbor 批量调用 agent 跑 Terminal-Bench，那时没有人坐在终端前。TUI 是给你自己用的，CLI 是给评测用的，后者是项目下一步的刚需。
 
@@ -725,6 +735,11 @@ readline 实现只位于 `app/cli/`。权限请求与结论同时作为 `UIEvent
 ```bash
 echo "统计 src 下有多少个 ts 文件" | node bin/agent.js --json | jq -r 'select(.type=="text_delta").delta'
 ```
+
+**完成情况**：默认 print 模式保持正文 stdout、工具与诊断 stderr；`--json` 的 stdout 只包含
+JSONL UIEvent。stdin prompt 和 `--json` 都切换到非交互 Interaction，权限拒绝会在 stderr
+留下 warn，同时通过正常的 `permission_request → permission_resolved:deny → tool_end` 事件链
+进入 JSONL。CLI 仍通过 AgentSession 运行，不复制 loop 或权限逻辑。
 
 ---
 
