@@ -381,6 +381,8 @@ export interface WrappedCommand {
 // ============================================================================
 
 export interface ResourceSnapshot {
+  /** 压力量纲与采样器来源；同一阈值在不同来源下需要可观测。 */
+  source: 'memory_pressure' | 'vm_stat' | 'system' | 'test';
   /** 0–1，1 表示系统即将 swap */
   memPressure: number;
   memAvailableMB: number;

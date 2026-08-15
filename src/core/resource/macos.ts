@@ -20,6 +20,7 @@ export interface MacOsResourceProbeOptions {
 }
 
 interface MemorySample {
+  source: 'memory_pressure' | 'vm_stat';
   memPressure: number;
   memAvailableMB: number;
   sampledAt: number;
@@ -76,15 +77,21 @@ export class MacOsResourceProbe implements ResourceProbe {
   async #sample(sampledAt: number): Promise<MemorySample> {
     try {
       const result = await this.#run('/usr/bin/memory_pressure', ['-Q']);
-      return { ...parseMemoryPressure(result.stdout), sampledAt };
+      return {
+        source: 'memory_pressure',
+        ...parseMemoryPressure(result.stdout),
+        sampledAt,
+      };
     } catch {
       const result = await this.#run('/usr/bin/vm_stat', []);
-      return { ...parseVmStat(result.stdout), sampledAt };
+      return { source: 'vm_stat', ...parseVmStat(result.stdout), sampledAt };
     }
   }
 }
 
-export function parseMemoryPressure(text: string): Omit<MemorySample, 'sampledAt'> {
+export function parseMemoryPressure(
+  text: string,
+): Omit<MemorySample, 'source' | 'sampledAt'> {
   const totalMatch = /system has\s+(\d+)\s*\(/iu.exec(text);
   const freeMatch = /memory free percentage:\s*(\d+(?:\.\d+)?)%/iu.exec(text);
   if (totalMatch?.[1] === undefined || freeMatch?.[1] === undefined) {
@@ -98,7 +105,9 @@ export function parseMemoryPressure(text: string): Omit<MemorySample, 'sampledAt
   };
 }
 
-export function parseVmStat(text: string): Omit<MemorySample, 'sampledAt'> {
+export function parseVmStat(
+  text: string,
+): Omit<MemorySample, 'source' | 'sampledAt'> {
   const pageSizeMatch = /page size of\s+(\d+)\s+bytes/iu.exec(text);
   if (pageSizeMatch?.[1] === undefined) {
     throw new Error('Unrecognized vm_stat page size');

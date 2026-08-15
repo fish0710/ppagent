@@ -326,6 +326,7 @@ describe('agent loop', () => {
     const tokenCounter = new O200kTokenCounter();
     const exporter = new InMemorySpanExporter();
     const snapshot = vi.fn(async () => ({
+      source: 'test' as const,
       memPressure: 0.9,
       memAvailableMB: 1_024,
       gpuBusy: false,
@@ -370,6 +371,7 @@ describe('agent loop', () => {
       expect.objectContaining({
         name: 'context.compact',
         attrs: expect.objectContaining({
+          'resource.sample_source': 'test',
           'resource.mem_pressure': 0.9,
           'resource.mem_available_mb': 1_024,
           'context.trigger': 'memory',

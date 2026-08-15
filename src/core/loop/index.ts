@@ -170,6 +170,7 @@ export async function runAgentLoop(
           if (options.compaction.resourceProbe !== undefined) {
             try {
               resource = await options.compaction.resourceProbe.snapshot();
+              compactSpan?.setAttribute('resource.sample_source', resource.source);
               compactSpan?.setAttribute('resource.mem_pressure', resource.memPressure);
               compactSpan?.setAttribute(
                 'resource.mem_available_mb',

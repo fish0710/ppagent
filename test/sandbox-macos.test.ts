@@ -1,4 +1,6 @@
-import { realpathSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { access, realpathSync } from 'node:fs';
 import {
   mkdir,
   mkdtemp,
@@ -11,11 +13,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MacOsSandbox } from '../src/core/sandbox/macos.js';
 
 const temporaryDirectories: string[] = [];
+const externalFiles: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((path) =>
       rm(path, { recursive: true, force: true }),
+    ),
+  );
+  await Promise.all(
+    externalFiles.splice(0).map((path) =>
+      rm(path, { force: true }),
     ),
   );
 });
@@ -87,10 +95,44 @@ describe('MacOsSandbox', () => {
       () => new MacOsSandbox({ cwd: workspace, networkAllowlist: ['example.com:443'] }),
     ).toThrow('Invalid sandbox network endpoint');
   });
+
+  macIt('executes sandbox-exec and blocks a write outside allowed roots', async () => {
+    const workspace = await temporaryDirectory('ppagent-m9-runtime-');
+    const sandbox = new MacOsSandbox({ cwd: workspace });
+    const allowed = join(workspace, 'allowed.txt');
+    const outside = `/Users/Shared/ppagent-m9-${randomUUID()}.txt`;
+    externalFiles.push(outside);
+
+    await execute(sandbox.wrapCommand(`printf allowed > ${allowed}`, workspace));
+    await expect(accessPromise(allowed)).resolves.toBeUndefined();
+
+    await expect(
+      execute(sandbox.wrapCommand(`printf blocked > ${outside}`, workspace)),
+    ).rejects.toThrow();
+    await expect(accessPromise(outside)).rejects.toThrow();
+  });
 });
 
 async function temporaryDirectory(prefix: string): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), prefix));
   temporaryDirectories.push(path);
   return path;
+}
+
+function execute(wrapped: { command: string; args: string[] }): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(wrapped.command, wrapped.args, (error) => {
+      if (error === null) resolve();
+      else reject(error);
+    });
+  });
+}
+
+function accessPromise(path: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    access(path, (error) => {
+      if (error === null) resolve();
+      else reject(error);
+    });
+  });
 }

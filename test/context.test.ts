@@ -186,12 +186,12 @@ function toolResult(id: string, name: string, timestamp: number): Message {
 
 function resourceSnapshot(memPressure: number) {
   return {
-    timestamp: 1,
-    memTotalMB: 100,
+    source: 'test' as const,
     memAvailableMB: 25,
     memPressure,
-    processRssMB: 1,
+    gpuBusy: false,
     activeSubagents: 0,
+    sampledAt: 1,
   };
 }
 

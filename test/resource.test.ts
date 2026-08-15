@@ -36,6 +36,7 @@ describe('resource probes', () => {
     });
 
     expect(await probe.snapshot()).toMatchObject({
+      source: 'memory_pressure',
       memPressure: 0.5,
       memAvailableMB: 8192,
       gpuBusy: false,
@@ -54,6 +55,21 @@ describe('resource probes', () => {
     releaseInference();
     releaseSubagent();
   });
+
+  macIt('samples the real macOS host and exposes the active pressure source', async () => {
+    const probe = new MacOsResourceProbe({
+      activity: new ResourceActivityTracker(),
+      cacheMs: 0,
+    });
+
+    const snapshot = await probe.snapshot();
+
+    expect(['memory_pressure', 'vm_stat']).toContain(snapshot.source);
+    expect(snapshot.memPressure).toBeGreaterThanOrEqual(0);
+    expect(snapshot.memPressure).toBeLessThanOrEqual(1);
+    expect(snapshot.memAvailableMB).toBeGreaterThanOrEqual(0);
+    expect(snapshot.sampledAt).toBeGreaterThan(0);
+  });
 });
 
 describe('ResourceAdmissionController', () => {
@@ -63,6 +79,7 @@ describe('ResourceAdmissionController', () => {
     const probe = {
       async snapshot() {
         return {
+          source: 'test' as const,
           memPressure: 0.2,
           memAvailableMB: 16_384,
           gpuBusy: activity.activeInference > 0,
@@ -107,6 +124,7 @@ describe('ResourceAdmissionController', () => {
       probe: {
         async snapshot() {
           return {
+            source: 'test' as const,
             memPressure: 0.95,
             memAvailableMB: 512,
             gpuBusy: false,

@@ -16,6 +16,7 @@ export class SystemResourceProbe implements ResourceProbe {
     const total = totalmem();
     const available = freemem();
     return {
+      source: 'system',
       memPressure: total === 0 ? 1 : Math.min(1, Math.max(0, 1 - available / total)),
       memAvailableMB: Math.round((available / (1024 * 1024)) * 10) / 10,
       gpuBusy: this.#activity.activeInference > 0,
