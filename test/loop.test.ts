@@ -365,7 +365,11 @@ describe('agent loop', () => {
     expect(result.reason).toBe('stop');
     expect(snapshot).toHaveBeenCalledOnce();
     expect(events).toContainEqual(
-      expect.objectContaining({ type: 'compacted', trigger: 'memory' }),
+      expect.objectContaining({
+        type: 'compacted',
+        trigger: 'memory',
+        resourceSource: 'test',
+      }),
     );
     expect(exporter.spans).toContainEqual(
       expect.objectContaining({

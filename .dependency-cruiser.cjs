@@ -36,6 +36,20 @@ module.exports = {
       from: { path: '^src/core/context/tokenizer\.ts$' },
       to: { path: '^(node:|node_modules/@huggingface/tokenizers)' },
     },
+    {
+      name: 'tui-core-contract-only',
+      severity: 'error',
+      comment: 'TUI 只消费 UIEvent/Interaction 类型，不得认识 loop、context 或 tools',
+      from: { path: '^src/app/tui' },
+      to: { path: '^src/core/', pathNot: '^src/core/types\.ts$' },
+    },
+    {
+      name: 'tui-session-port-only',
+      severity: 'error',
+      comment: 'TUI 只通过 AgentSession 窄端口连接装配层',
+      from: { path: '^src/app/tui' },
+      to: { path: '^src/agent/', pathNot: '^src/agent/session\.ts$' },
+    },
   ],
   options: {
     doNotFollow: { path: 'node_modules' },

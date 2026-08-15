@@ -57,7 +57,9 @@ export class PrintCliEventRenderer implements CliEventRenderer {
         break;
       case 'compacted':
         this.#stderr.write(
-          `\n[context:compacted] ${event.trigger} ${event.tokensBefore} → ${event.tokensAfter} tokens\n`,
+          `\n[context:compacted] ${event.trigger} ${event.tokensBefore} → ${event.tokensAfter} tokens${
+            event.resourceSource === undefined ? '' : ` (${event.resourceSource})`
+          }\n`,
         );
         break;
       case 'admission_denied':

@@ -864,6 +864,36 @@ CI 使用 `ubuntu-latest` / `macos-latest` 矩阵。macOS job 会真正执行 `s
 
 ---
 
+### 可选阶段 · 轻量 TUI
+
+**定位**：TUI 是 `UIEvent` 的消费者和 `Interaction` 的实现，只调用 `AgentSession.prompt()`、
+`abort()`、`subscribe()`、`setInteraction()` 所表达的边界，不读取 context，也不认识 loop 和 tools。
+
+**渲染契约**：不使用 alternate screen。模型正文按换行提交到 append-only transcript；未完成的半行、
+prefill/decode 指标和最多三个并发工具留在固定 live 区。终端驱动只使用 `CSI n A` 上移和
+`CSI 0 J` 清到末尾后整体重画 live，不实现屏幕 diff。所有模型/工具文本先去除终端控制字符；
+裁剪按 grapheme 和终端列宽处理 CJK、emoji，不画需要左右对齐的边框。
+
+**纯函数地基**：`reduceTuiState(state, action, nowMs)` 从 UIEvent 派生 phase、transcript 和 live 数据；
+`renderTuiFrame(state, width, nowMs)` 只返回 transcript/live 行。M8 的 NDJSON 可直接作为 fixture 回放，
+测试不需要伪终端或真实模型。IO 只存在于 `TuiTerminalRenderer`、`TuiInteraction` 和 `TuiApp`。
+
+**本地模型观测**：`turn_start` 可选携带 `contextTokens/contextWindow`；`compacted` 可选携带
+`resourceSource`。TUI 因此能显示静默 prefill 时长、流中近似 tok/s、一轮结束后的 usage 精确 tok/s、
+上下文比例、压缩触发原因/采样器和准入拒绝重试建议。字段均为可选，既有 JSONL 消费方保持兼容。
+
+**输入与取消**：空闲时才创建 readline；调用 `session.prompt()` 前立即关闭。confirm 先提交 live 半行，
+再用 raw mode 读取单个 `y/n`，第一行展示工具 `describe(args)` 的真实摘要。运行中第一次 Ctrl+C
+调用 `session.abort()`，第二次（1.5 秒内）请求进程退出；空闲 Ctrl+C 直接退出。取消端到端实测会
+杀掉 `sleep 300 & sleep 300` 的整个进程组，无孤儿进程。
+
+```bash
+node bin/agent.js --tui
+node bin/agent.js --tui --provider lmstudio --model qwen3.6-27b "分析当前仓库"
+```
+
+---
+
 ## 7. 插桩清单
 
 | 接口 | 定义于 | 桩实现 | 真实实现 | 替换时机 |
@@ -876,7 +906,7 @@ CI 使用 `ubuntu-latest` / `macos-latest` 矩阵。macOS job 会真正执行 `s
 | `SpanExporter` | M6 | 打到 stderr | Laminar | M11 |
 | `CompactPolicy` 的 resource 输入 | M5 | `undefined` | 接入探针快照 | M10 |
 | 工具调用形态 | M3 | 仅原生 tool calling | 验证本地服务的原生 tool calling 兼容性 | M11 |
-| `Interaction` | M1 | 非交互自动拒绝 | CLI readline 确认（已接入）/ TUI 弹窗 | M7 / TUI 阶段 |
+| `Interaction` | M1 | 非交互自动拒绝 | CLI readline / TUI raw-mode 单键确认 | M7 / TUI 阶段（已接入） |
 
 **桩的两条纪律**
 
@@ -998,5 +1028,6 @@ curl http://localhost:1234/v1/models | jq '.data[].id'
 | M9 | 沙箱 | sandbox-exec | 越界被拦截 |
 | M10 | 探针与准入 | 卖点落地 | 资源不足时拒绝 subagent |
 | M11 | 本地模型 | 原生 tool calling 兼容性验证 + 评测 | Terminal-Bench 对照跑通 |
+| 可选 | 轻量 TUI | transcript/live + Interaction | `--tui` 多轮、确认与取消跑通 |
 
-TUI 不在关键路径上，M8 之后任意时间插入。
+TUI 不在关键交付路径上；当前已在 M11 后以独立 app 边缘层落地。

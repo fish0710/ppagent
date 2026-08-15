@@ -1,0 +1,17 @@
+{"type":"turn_start","turn":1,"contextTokens":4200,"contextWindow":8000}
+{"type":"text_delta","delta":"我先看一下"}
+{"type":"text_delta","delta":"现有实现。\n"}
+{"type":"turn_end","turn":1,"usage":{"input":4200,"output":12,"cacheRead":0,"cacheWrite":0},"stopReason":"toolUse"}
+{"type":"tool_start","id":"read-1","name":"read","args":{"path":"src/auth.ts"}}
+{"type":"tool_end","id":"read-1","name":"read","isError":false,"preview":"export function auth() {}","durationMs":1200}
+{"type":"tool_start","id":"bash-1","name":"bash","args":{"cmd":"rm -f /tmp/test.txt"}}
+{"type":"permission_request","req":{"toolName":"bash","summary":"rm -f /tmp/test.txt","detail":"{\"cmd\":\"rm -f /tmp/test.txt\"}"}}
+{"type":"permission_resolved","decision":"deny"}
+{"type":"tool_end","id":"bash-1","name":"bash","isError":true,"preview":"User denied tool execution.","durationMs":10}
+{"type":"turn_start","turn":2,"contextTokens":6200,"contextWindow":8000}
+{"type":"compacted","trigger":"memory","tokensBefore":6200,"tokensAfter":1100,"resourceSource":"memory_pressure"}
+{"type":"admission_denied","reason":"GPU busy","retryAfterMs":10000}
+{"type":"text_delta","delta":"我会改用串行策略"}
+{"type":"text_delta","delta":"继续。"}
+{"type":"turn_end","turn":2,"usage":{"input":1100,"output":20,"cacheRead":0,"cacheWrite":0},"stopReason":"stop"}
+{"type":"loop_end","reason":"stop","turns":2}

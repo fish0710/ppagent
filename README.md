@@ -22,6 +22,7 @@
 - M9：macOS `sandbox-exec` 隔离、路径越界与网络白名单已完成
 - M10：macOS 资源探针、内存/GPU 准入和 `spawn_subagent` 已完成
 - M11：本地 provider 别名、原生 tool calling 探针、匹配 tokenizer、Laminar 与 Harbor 适配器已完成
+- 可选 TUI：scrollback transcript、固定 live 区、本地推理指标与单键权限确认已完成
 
 M0–M11 的开发路线已经贯通；目前仍是源码构建使用，还没有可安装的发行版本。
 
@@ -55,6 +56,28 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 
 默认 faux provider 会脚本化地产生一次 `read` 调用，再读取工具结果进入第二轮并完成任务。
 命令行通过可复用的 `AgentSession` 装配 core 组件，默认 print 模式只把模型正文写到 stdout。
+
+### 使用轻量 TUI
+
+TUI 只消费 `UIEvent` 并实现 `Interaction`，不持有 context、loop 或 tool 状态。它不进入
+alternate screen，已经提交的 transcript 会留在终端 scrollback；只有底部有限行的 prefill、
+decode 和工具状态会原地重画：
+
+```bash
+node bin/agent.js --tui
+
+# 也可以带第一条任务启动；完成后仍可继续输入下一条
+node bin/agent.js --tui \
+  --provider lmstudio --model qwen3.6-27b \
+  "读取 package.json 并说明项目结构"
+```
+
+空闲时输入 `/exit` 或 `/quit` 退出。任务运行时第一次 `Ctrl+C` 调用 `session.abort()` 并等待工具
+进程组清理，1.5 秒内第二次按下则请求退出；空闲时 `Ctrl+C` 直接退出。权限确认使用 raw mode
+单键 `y/n`，不会让 readline 抢走运行期间的 SIGINT。
+
+live 区显示静默 prefill 时间、近似流式 tok/s 和上下文占比；一轮结束后使用 provider 的 usage
+提交精确 tok/s。内存压缩和子 agent 准入拒绝作为永久 transcript 行显示，并包含资源采样来源。
 
 ### 验证脚本调用与 JSONL
 

@@ -313,4 +313,24 @@ NDJSON，stderr 单独保存。适配器 smoke 必须以“进入 verifier、0 H
 显式设为 false 才允许下载，且共享 AbortController deadline。dependency-cruiser 和源码守卫测试共同
 防止文件依赖或裸 `fetch()` 再次进入 core tokenizer。
 
+### 12.1 TUI 不应变成第二个 Agent 状态机
+
+**风险**：TUI 自己保存“当前消息、工具和上下文”的副本，并根据调用顺序猜测运行阶段，会产生与
+AgentSession 真实状态不一致的第二事实源。全屏 diff 渲染又会吞掉 scrollback，让 coding 输出难以
+回看和复制。
+
+**修法**：phase、工具活动和指标只由 `UIEvent` 经纯 reducer 派生；TUI 不读取 session.context。
+已经换行或结束的内容只追加到 transcript，永不修改；只有固定大小的 live 区用“上移 + 清除”重画，
+不进入 alternate screen。NDJSON 直接作为 reducer fixture。
+
+### 12.2 readline、raw mode 与 SIGINT 必须互斥
+
+**风险**：agent 运行期间保留 terminal readline，会由 readline 抢走 Ctrl+C，取消信号到不了
+`session.abort → toolContext.signal → 进程组 kill`。流式正文尚有半行时插入权限框，还会被随后 live
+重画覆盖。按 UTF-16 长度裁剪中文/emoji 则会让 live 行意外换行，破坏光标上移计数。
+
+**修法**：readline 只在 idle 读取下一条 prompt，调用 session 前关闭；confirm 先提交半行，再切 raw
+mode 读取单个 y/n，结束后恢复原模式。运行期 SIGINT 实现“首次取消、1.5 秒内再次退出”，空闲时直接
+退出。live 文本按 grapheme 和终端列宽裁剪，并在写终端前剥离控制字符。
+
 ---

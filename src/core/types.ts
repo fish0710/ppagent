@@ -690,7 +690,13 @@ export interface SpanExporter {
 export type LoopEndReason = 'stop' | 'maxTurns' | 'aborted' | 'error';
 
 export type UIEvent =
-  | { type: 'turn_start'; turn: number }
+  | {
+      type: 'turn_start';
+      turn: number;
+      /** 模型请求发出前的上下文估算；旧的事件生产者可以省略。 */
+      contextTokens?: number;
+      contextWindow?: number;
+    }
   | { type: 'text_delta'; delta: string }
   | { type: 'thinking_delta'; delta: string }
   | { type: 'tool_start'; id: ToolCallId; name: string; args: unknown }
@@ -713,6 +719,8 @@ export type UIEvent =
       trigger: CompactTrigger;
       tokensBefore: number;
       tokensAfter: number;
+      /** 内存参与决策时标明采样器，避免不同量纲的探针被混为一谈。 */
+      resourceSource?: ResourceSnapshot['source'];
     }
   | { type: 'turn_end'; turn: number; usage: Usage; stopReason: StopReason }
   /** 每次 loop 恰好发一次；调用方不需要从 break 或最后一个 turn_end 猜原因。 */

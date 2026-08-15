@@ -147,7 +147,15 @@ export async function runAgentLoop(
 
     for (let turn = 1; turn <= options.loopConfig.maxTurns; turn += 1) {
     if (signal.aborted) return finish('aborted', turn - 1);
-    emit({ type: 'turn_start', turn });
+    emit({
+      type: 'turn_start',
+      turn,
+      ...(contextManager === undefined
+        ? {}
+        : { contextTokens: contextManager.tokenUsage() }),
+      contextWindow:
+        options.compaction?.contextWindow ?? options.model.contextWindow,
+    });
     // 单轮控制器同时包住模型生成和随后的工具执行；超时不是只限制 HTTP。
     const control = createTurnControl(
       signal,
@@ -165,6 +173,7 @@ export async function runAgentLoop(
         const compactTrace = turnTrace.child('compact');
         const compactSpan = spans?.start('context.compact', compactTrace);
         let compacted: CompactResult | null;
+        let resourceSource: ResourceSnapshot['source'] | undefined;
         try {
           let resource = options.compaction.resource;
           if (options.compaction.resourceProbe !== undefined) {
@@ -186,6 +195,7 @@ export async function runAgentLoop(
               compactSpan?.setAttribute('resource.probe_error', errorMessage(error));
             }
           }
+          resourceSource = resource?.source;
           compacted = await contextManager.compactIfNeeded({
             policy: options.compaction.policy,
             summarizer: options.compaction.summarizer,
@@ -222,6 +232,7 @@ export async function runAgentLoop(
             trigger: compacted.trigger,
             tokensBefore: compacted.tokensBefore,
             tokensAfter: compacted.tokensAfter,
+            ...(resourceSource === undefined ? {} : { resourceSource }),
           });
         }
       }

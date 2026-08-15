@@ -44,6 +44,7 @@ import {
   createCliEventRenderer,
   readCliInput,
 } from '../dist/app/cli/index.js';
+import { TuiApp } from '../dist/app/tui/index.js';
 import {
   MacOsSandbox,
   PassthroughSandbox,
@@ -54,6 +55,7 @@ import {
 } from '../dist/core/tools/index.js';
 import type {
   CompactResult,
+  Interaction,
   Message,
   StoreRecord,
   ToolContext,
@@ -88,6 +90,7 @@ interface AgentArgs {
   resume: boolean;
   trace: boolean;
   json: boolean;
+  tui: boolean;
   permissionMode: 'interactive' | 'deny' | 'allow';
 }
 
@@ -100,7 +103,7 @@ function printHelp(): void {
   agent --version
   agent [--provider faux|anthropic|openai|custom|lmstudio|llamacpp] [--model MODEL] [--max-turns N]
         [--config PATH] [--max-tokens N] [--session ID] [--resume] [--trace]
-        [--json] [--permission-mode interactive|deny|allow] [PROMPT]
+        [--json | --tui] [--permission-mode interactive|deny|allow] [PROMPT]
   agent --smoke [--provider faux|anthropic|openai|custom|lmstudio|llamacpp] [--model MODEL] [PROMPT]
   agent --check-compat [--provider custom|lmstudio|llamacpp] --model MODEL
   agent --tool read|write|edit|bash [--args JSON]
@@ -111,6 +114,7 @@ Custom provider environment:
 
 Input/output:
   With no PROMPT, read it from stdin. --json writes one UIEvent per stdout line.
+  --tui starts the scrollback-preserving interactive terminal UI and requires a TTY.
   --permission-mode allow is only for an already isolated benchmark/container.
 `);
 }
@@ -234,6 +238,23 @@ async function runAgent(args: AgentArgs): Promise<void> {
       : exporters.length === 1
         ? exporters[0]
         : new CompositeSpanExporter(exporters);
+  if (args.tui) {
+    const tui = new TuiApp();
+    if (tokenCounterSelection.warning !== undefined) {
+      tui.renderer.render({
+        type: 'notify',
+        level: 'warn',
+        message: tokenCounterSelection.warning,
+      });
+    }
+    const session = createSession(tui.interaction);
+    const result = await tui.run(
+      session,
+      args.prompt.length === 0 ? undefined : args.prompt,
+    );
+    if (result.exitCode !== 0) process.exitCode = result.exitCode;
+    return;
+  }
   const renderer = createCliEventRenderer(args.json ? 'json' : 'print');
   if (tokenCounterSelection.warning !== undefined) {
     renderer.render({
@@ -245,24 +266,7 @@ async function runAgent(args: AgentArgs): Promise<void> {
   const interaction = createAgentInteraction(args.json, (event) => {
     renderer.render({ type: 'notify', ...event });
   }, args.permissionMode);
-  const session = createAgentSession({
-    config,
-    provider,
-    model,
-    cwd: process.cwd(),
-    interaction,
-    tokenCounter: tokenCounterSelection.counter,
-    context: stored.context,
-    ...(stored.previousSummary === undefined
-      ? {}
-      : { previousSummary: stored.previousSummary }),
-    ...(stored.persistence === undefined
-      ? {}
-      : { persistence: stored.persistence }),
-    ...(spanExporter === undefined
-      ? {}
-      : { telemetry: { exporter: spanExporter } }),
-  });
+  const session = createSession(interaction);
   const onInterrupt = (): void => {
     session.abort(new Error('Interrupted by user'));
   };
@@ -278,6 +282,27 @@ async function runAgent(args: AgentArgs): Promise<void> {
     process.removeListener('SIGINT', onInterrupt);
     unsubscribe();
     if (interaction instanceof CliInteraction) interaction.close();
+  }
+
+  function createSession(interactionForSession: Interaction) {
+    return createAgentSession({
+      config,
+      provider,
+      model,
+      cwd: process.cwd(),
+      interaction: interactionForSession,
+      tokenCounter: tokenCounterSelection.counter,
+      context: stored.context,
+      ...(stored.previousSummary === undefined
+        ? {}
+        : { previousSummary: stored.previousSummary }),
+      ...(stored.persistence === undefined
+        ? {}
+        : { persistence: stored.persistence }),
+      ...(spanExporter === undefined
+        ? {}
+        : { telemetry: { exporter: spanExporter } }),
+    });
   }
 }
 
@@ -423,6 +448,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
   let resume = false;
   let trace = false;
   let json = false;
+  let tui = false;
   let permissionMode: AgentArgs['permissionMode'] = 'interactive';
   const promptParts: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -438,6 +464,10 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
     }
     if (arg === '--json') {
       json = true;
+      continue;
+    }
+    if (arg === '--tui') {
+      tui = true;
       continue;
     }
     if (
@@ -476,17 +506,27 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
     promptParts.push(arg);
   }
   let prompt = promptParts.join(' ').trim();
-  if (prompt.length === 0) {
+  if (prompt.length === 0 && !tui) {
     if (process.stdin.isTTY === true) {
       throw new Error('A prompt is required (argument or stdin)');
     }
     prompt = await readCliInput(process.stdin);
   }
-  if (prompt.length === 0) {
+  if (prompt.length === 0 && !tui) {
     throw new Error('A prompt is required (argument or stdin)');
   }
   if (resume && session === undefined) {
     throw new Error('--resume requires --session ID');
+  }
+  if (tui && json) throw new Error('--tui cannot be combined with --json');
+  if (tui && permissionMode !== 'interactive') {
+    throw new Error('--tui only supports --permission-mode interactive');
+  }
+  if (
+    tui &&
+    (process.stdin.isTTY !== true || process.stdout.isTTY !== true)
+  ) {
+    throw new Error('--tui requires TTY stdin and stdout');
   }
   return {
     ...(provider === undefined ? {} : { provider }),
@@ -499,6 +539,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
     resume,
     trace,
     json,
+    tui,
     permissionMode,
   };
 }
