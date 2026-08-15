@@ -316,21 +316,23 @@ NDJSON，stderr 单独保存。适配器 smoke 必须以“进入 verifier、0 H
 ### 12.1 TUI 不应变成第二个 Agent 状态机
 
 **风险**：TUI 自己保存“当前消息、工具和上下文”的副本，并根据调用顺序猜测运行阶段，会产生与
-AgentSession 真实状态不一致的第二事实源。全屏 diff 渲染又会吞掉 scrollback，让 coding 输出难以
-回看和复制。
+AgentSession 真实状态不一致的第二事实源。使用 alternate screen 又会吞掉终端 scrollback，让 coding
+输出难以回看和复制。
 
 **修法**：phase、工具活动和指标只由 `UIEvent` 经纯 reducer 派生；TUI 不读取 session.context。
-已经换行或结束的内容只追加到 transcript，永不修改；只有固定大小的 live 区用“上移 + 清除”重画，
-不进入 alternate screen。NDJSON 直接作为 reducer fixture。
+已经换行或结束的内容只追加到 transcript，永不修改。渲染使用 pi-tui `TuiMainScreen` 保留 scrollback，
+由库处理 main-screen 差分和同步输出，禁止切换 `TuiAltScreen`。NDJSON 直接作为 reducer fixture。
 
-### 12.2 readline、raw mode 与 SIGINT 必须互斥
+### 12.2 raw mode 下 Ctrl+C 是输入，不是 SIGINT
 
-**风险**：agent 运行期间保留 terminal readline，会由 readline 抢走 Ctrl+C，取消信号到不了
-`session.abort → toolContext.signal → 进程组 kill`。流式正文尚有半行时插入权限框，还会被随后 live
-重画覆盖。按 UTF-16 长度裁剪中文/emoji 则会让 live 行意外换行，破坏光标上移计数。
+**风险**：pi-tui `ProcessTerminal` 在 raw mode 下接收到的是 Ctrl+C 按键字节，进程级 SIGINT handler
+不会触发；如果只保留旧 CLI 的信号监听，取消永远到不了
+`session.abort → toolContext.signal → 进程组 kill`。权限确认的临时监听若不消费按键，还会把 y/n
+泄漏给底层 prompt Input。
 
-**修法**：readline 只在 idle 读取下一条 prompt，调用 session 前关闭；confirm 先提交半行，再切 raw
-mode 读取单个 y/n，结束后恢复原模式。运行期 SIGINT 实现“首次取消、1.5 秒内再次退出”，空闲时直接
-退出。live 文本按 grapheme 和终端列宽裁剪，并在写终端前剥离控制字符。
+**修法**：TUI 全程只让 `ProcessTerminal` 管理 raw mode，prompt 使用 pi-tui `Input`。全局 input
+listener 用 `matchesKey(ctrl+c)` 实现“首次取消、1.5 秒内再次退出、空闲直接退出”；confirm 安装更窄的
+模态 listener，处理 y/n/Ctrl+C 后必须 resolve 并卸载。进程级 SIGINT 只作为外部信号兜底。宽字符、
+光标、粘贴、差分和 ANSI 输出交给 pi-tui，项目只保留 UIEvent reducer 与业务文案。
 
 ---

@@ -1,19 +1,22 @@
 import { readFileSync } from 'node:fs';
-import { PassThrough, Writable } from 'node:stream';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  stripTerminalSequences,
+  truncateToWidth,
+  visibleWidth,
+  type Terminal,
+} from '@earendil-works/pi-tui';
 import { describe, expect, it } from 'vitest';
 import type { UIEvent } from '../src/core/types.js';
 import {
   TuiTerminalRenderer,
+  TuiInteraction,
   clipTailToWidth,
-  clipToWidth,
   createInitialTuiState,
   decideTuiInterrupt,
-  readConfirmationKey,
   reduceTuiState,
   renderTuiFrame,
-  stringWidth,
   type TuiState,
 } from '../src/app/tui/index.js';
 
@@ -109,22 +112,24 @@ describe('TUI terminal edge', () => {
   });
 
   it('handles CJK and emoji widths without splitting graphemes', () => {
-    expect(stringWidth('中a🙂')).toBe(5);
-    expect(clipToWidth('中文abc', 5)).toBe('中文…');
-    expect(stringWidth(clipToWidth('中文abc', 5))).toBeLessThanOrEqual(5);
+    expect(visibleWidth('中a🙂')).toBe(5);
+    expect(stripTerminalSequences(truncateToWidth('中文abc', 5, '…'))).toBe('中文…');
+    expect(visibleWidth(truncateToWidth('中文abc', 5, '…'))).toBeLessThanOrEqual(5);
     expect(clipTailToWidth('abc中文', 5)).toBe('…中文');
-    expect(stringWidth(clipTailToWidth('abc中文', 5))).toBeLessThanOrEqual(5);
-    expect(clipToWidth('👨‍👩‍👧‍👦abc', 4)).toBe('👨‍👩‍👧‍👦a…');
+    expect(visibleWidth(clipTailToWidth('abc中文', 5))).toBeLessThanOrEqual(5);
+    expect(
+      stripTerminalSequences(truncateToWidth('👨‍👩‍👧‍👦abc', 4, '…')),
+    ).toBe('👨‍👩‍👧‍👦a…');
   });
 
-  it('only redraws the bounded live region and never enters alternate screen', () => {
-    const output = captureWritable();
+  it('uses pi-tui main-screen differential rendering without alternate screen', () => {
+    const terminal = new MemoryTerminal(40, 24);
     let now = 1_000;
     const renderer = new TuiTerminalRenderer({
-      output: output.stream,
+      terminal,
       now: () => now,
-      width: () => 40,
     });
+    renderer.start();
     renderer.render({
       type: 'turn_start',
       turn: 1,
@@ -133,81 +138,126 @@ describe('TUI terminal edge', () => {
     });
     now += 500;
     renderer.render({ type: 'text_delta', delta: 'hello' });
+    renderer.refresh();
     now += 500;
     renderer.render({ type: 'text_delta', delta: ' world\n' });
+    renderer.refresh();
     renderer.finish();
 
-    expect(output.text()).toContain('hello world\n');
-    expect(output.text()).toContain('\u001b[');
-    expect(output.text()).toContain('\u001b[0J');
-    expect(output.text()).not.toContain('?1049');
-    expect(output.text().match(/hello world\n/gu)).toHaveLength(1);
+    expect(renderer.mode).toBe('regular');
+    expect(terminal.text()).toContain('hello world');
+    expect(terminal.text()).toContain('\u001b[');
+    expect(terminal.text()).not.toContain('?1049');
+    expect(terminal.started).toBe(1);
+    expect(terminal.stopped).toBe(1);
   });
 
-  it('falls back to 80 columns when a pseudo TTY reports zero columns', () => {
-    const output = captureWritable();
-    Object.assign(output.stream, { columns: 0 });
-    const renderer = new TuiTerminalRenderer({ output: output.stream, now: () => 6_000 });
+  it('uses pi-tui Input for CJK prompt editing and submission', async () => {
+    const terminal = new MemoryTerminal();
+    const renderer = new TuiTerminalRenderer({ terminal });
+    renderer.start();
+    const prompt = renderer.readPrompt();
+    terminal.send('中');
+    terminal.send('\r');
+    await expect(prompt).resolves.toBe('中');
+    expect(renderer.state.transcript.at(-1)).toBe('> 中');
+    renderer.finish();
+  });
+
+  it('routes confirmation keys through pi-tui input listeners', async () => {
+    const terminal = new MemoryTerminal();
+    const renderer = new TuiTerminalRenderer({ terminal });
+    const interaction = new TuiInteraction(renderer);
+    renderer.start();
     renderer.render({
-      type: 'turn_start',
-      turn: 1,
-      contextTokens: 4200,
-      contextWindow: 8000,
+      type: 'permission_request',
+      req: { toolName: 'bash', summary: 'rm -f /tmp/x' },
     });
-    expect(output.text()).toContain('prefill 4.2k tokens');
-  });
-
-  it('reads y/n as one raw key and restores terminal mode', async () => {
-    const input = new PassThrough() as PassThrough & {
-      isTTY: boolean;
-      isRaw: boolean;
-      setRawMode(mode: boolean): void;
-    };
-    const modes: boolean[] = [];
-    input.isTTY = true;
-    input.isRaw = false;
-    input.setRawMode = (mode) => {
-      modes.push(mode);
-      input.isRaw = mode;
-    };
-    input.pause();
-    const decision = readConfirmationKey(input);
-    input.write('y');
+    const decision = interaction.confirm({ message: 'rm -f /tmp/x' });
+    terminal.send('y');
     await expect(decision).resolves.toBe(true);
-    expect(modes).toEqual([true, false]);
-    expect(input.isPaused()).toBe(true);
+    interaction.close();
+    renderer.finish();
   });
 
-  it('routes raw Ctrl+C through the TUI interrupt handler and denies', async () => {
-    const input = new PassThrough() as PassThrough & {
-      isTTY: boolean;
-      isRaw: boolean;
-      setRawMode(mode: boolean): void;
-    };
-    input.isTTY = true;
-    input.isRaw = false;
-    input.setRawMode = (mode) => { input.isRaw = mode; };
+  it('routes pi-tui Ctrl+C through the interrupt handler and denies', async () => {
+    const terminal = new MemoryTerminal();
+    const renderer = new TuiTerminalRenderer({ terminal });
     let interrupts = 0;
-    const decision = readConfirmationKey(input, () => { interrupts += 1; });
-    input.write('\u0003');
+    const interaction = new TuiInteraction(renderer, {
+      onInterrupt: () => { interrupts += 1; },
+    });
+    renderer.start();
+    renderer.render({
+      type: 'permission_request',
+      req: { toolName: 'bash', summary: 'rm -f /tmp/x' },
+    });
+    const decision = interaction.confirm({ message: 'rm -f /tmp/x' });
+    terminal.send('\u0003');
     await expect(decision).resolves.toBe(false);
     expect(interrupts).toBe(1);
-    expect(input.isRaw).toBe(false);
+    interaction.close();
+    renderer.finish();
+  });
+
+  it('releases confirmation when an external SIGINT path cancels it', async () => {
+    const terminal = new MemoryTerminal();
+    const renderer = new TuiTerminalRenderer({ terminal });
+    const interaction = new TuiInteraction(renderer);
+    renderer.start();
+    renderer.render({
+      type: 'permission_request',
+      req: { toolName: 'bash', summary: 'rm -f /tmp/x' },
+    });
+    const decision = interaction.confirm({ message: 'rm -f /tmp/x' });
+    interaction.cancelConfirmation();
+    await expect(decision).resolves.toBe(false);
+    renderer.finish();
   });
 });
 
-function captureWritable(): {
-  stream: Writable;
-  text(): string;
-} {
-  let value = '';
-  const stream = new Writable({
-    write(chunk: Buffer | string, _encoding, callback) {
-      value += chunk.toString();
-      callback();
-    },
-  });
-  return { stream, text: () => value };
+class MemoryTerminal implements Terminal {
+  readonly kittyProtocolActive = false;
+  readonly columns: number;
+  readonly rows: number;
+  started = 0;
+  stopped = 0;
+  #value = '';
+  #onInput: ((data: string) => void) | undefined;
+
+  constructor(columns = 80, rows = 24) {
+    this.columns = columns;
+    this.rows = rows;
+  }
+
+  start(onInput: (data: string) => void, _onResize: () => void): void {
+    this.started += 1;
+    this.#onInput = onInput;
+  }
+
+  stop(): void {
+    this.stopped += 1;
+    this.#onInput = undefined;
+  }
+
+  async drainInput(): Promise<void> {}
+  write(data: string): void { this.#value += data; }
+  moveBy(lines: number): void { this.write(`\u001b[${Math.abs(lines)}${lines < 0 ? 'A' : 'B'}`); }
+  hideCursor(): void { this.write('\u001b[?25l'); }
+  showCursor(): void { this.write('\u001b[?25h'); }
+  clearLine(): void { this.write('\u001b[2K'); }
+  clearFromCursor(): void { this.write('\u001b[0J'); }
+  clearScreen(): void { this.write('\u001b[2J'); }
+  setTitle(_title: string): void {}
+  setProgress(_active: boolean): void {}
+
+  send(data: string): void {
+    this.#onInput?.(data);
+  }
+
+  text(): string {
+    return this.#value;
+  }
 }
 
 // 编译期也守住 reducer 返回完整 TuiState，而不是依赖测试里的类型断言。

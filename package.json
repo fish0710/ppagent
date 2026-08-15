@@ -4,6 +4,9 @@
   "description": "为本地部署模型设计的 coding agent harness",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
     "build": "npm run build:src && npm run build:bin",
     "build:src": "tsc -p tsconfig.json",
@@ -20,6 +23,7 @@
   "license": "ISC",
   "dependencies": {
     "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-tui": "^0.84.2",
     "@huggingface/tokenizers": "^0.1.3",
     "gpt-tokenizer": "^3.4.0"
   },

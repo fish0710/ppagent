@@ -28,7 +28,7 @@ M0–M11 的开发路线已经贯通；目前仍是源码构建使用，还没�
 
 ## 本地开发
 
-需要 Node.js 22。
+需要 Node.js 22.19 或更高版本。
 
 ```bash
 npm ci
@@ -59,9 +59,9 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 
 ### 使用轻量 TUI
 
-TUI 只消费 `UIEvent` 并实现 `Interaction`，不持有 context、loop 或 tool 状态。它不进入
-alternate screen，已经提交的 transcript 会留在终端 scrollback；只有底部有限行的 prefill、
-decode 和工具状态会原地重画：
+TUI 只消费 `UIEvent` 并实现 `Interaction`，不持有 context、loop 或 tool 状态。终端设施使用
+`@earendil-works/pi-tui` 的 `TuiMainScreen`，不进入 alternate screen；已经提交的 transcript
+会留在终端 scrollback，底部的 prefill、decode 和工具状态由 pi-tui 做同步差分渲染：
 
 ```bash
 node bin/agent.js --tui
@@ -73,8 +73,9 @@ node bin/agent.js --tui \
 ```
 
 空闲时输入 `/exit` 或 `/quit` 退出。任务运行时第一次 `Ctrl+C` 调用 `session.abort()` 并等待工具
-进程组清理，1.5 秒内第二次按下则请求退出；空闲时 `Ctrl+C` 直接退出。权限确认使用 raw mode
-单键 `y/n`，不会让 readline 抢走运行期间的 SIGINT。
+进程组清理，1.5 秒内第二次按下则请求退出；空闲时 `Ctrl+C` 直接退出。`ProcessTerminal` 统一管理
+raw mode 和键盘协议，prompt 使用 pi-tui `Input`（支持 CJK/IME、编辑和 bracketed paste），权限确认
+通过 input listener 消费单键 `y/n`。
 
 live 区显示静默 prefill 时间、近似流式 tok/s 和上下文占比；一轮结束后使用 provider 的 usage
 提交精确 tok/s。内存压缩和子 agent 准入拒绝作为永久 transcript 行显示，并包含资源采样来源。

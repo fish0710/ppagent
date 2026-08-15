@@ -1,4 +1,4 @@
-import { createInterface, type Interface } from 'node:readline/promises';
+import { Key, matchesKey } from '@earendil-works/pi-tui';
 import type { AgentSession } from '../../agent/session.js';
 import { TuiInteraction } from './interaction.js';
 import { TuiTerminalRenderer } from './render.js';
@@ -9,10 +9,8 @@ export type TuiSessionPort = Pick<
 >;
 
 export interface TuiAppOptions {
-  input?: NodeJS.ReadableStream;
-  output?: NodeJS.WritableStream;
+  renderer?: TuiTerminalRenderer;
   now?: () => number;
-  width?: () => number;
   /** 第二次 Ctrl+C 不直接 process.exit；由宿主决定退出码，等待取消清理完成。 */
   requestProcessExit?: (code: number) => void;
 }
@@ -34,34 +32,26 @@ export function decideTuiInterrupt(
 
 /**
  * 薄装配层：只把 UIEvent、prompt/abort 和 Interaction 接到 AgentSession。
- * 它不读取 Context，不认识 loop、provider 或工具注册表。
+ * 键盘/raw mode/IME 由 pi-tui ProcessTerminal 和 Input 负责。
  */
 export class TuiApp {
   readonly renderer: TuiTerminalRenderer;
   readonly interaction: TuiInteraction;
-  readonly #input: NodeJS.ReadableStream;
-  readonly #output: NodeJS.WritableStream;
   readonly #now: () => number;
   readonly #requestProcessExit: (code: number) => void;
   #session: TuiSessionPort | undefined;
-  #readline: Interface | undefined;
   #running = false;
   #exitRequested = false;
   #lastRunningInterruptMs = Number.NEGATIVE_INFINITY;
 
   constructor(options: TuiAppOptions = {}) {
-    this.#input = options.input ?? process.stdin;
-    this.#output = options.output ?? process.stdout;
     this.#now = options.now ?? Date.now;
     this.#requestProcessExit =
       options.requestProcessExit ?? ((code) => { process.exitCode = code; });
-    this.renderer = new TuiTerminalRenderer({
-      output: this.#output,
+    this.renderer = options.renderer ?? new TuiTerminalRenderer({
       ...(options.now === undefined ? {} : { now: options.now }),
-      ...(options.width === undefined ? {} : { width: options.width }),
     });
     this.interaction = new TuiInteraction(this.renderer, {
-      input: this.#input,
       onInterrupt: () => this.#handleInterrupt(),
     });
   }
@@ -76,6 +66,17 @@ export class TuiApp {
     this.#exitRequested = false;
     let exitCode = 0;
     const unsubscribe = session.subscribe((event) => this.renderer.render(event));
+    const removeInputListener = this.renderer.addInputListener((data) => {
+      // confirmation 自己消费 Ctrl+C，以便同时 resolve(false)；其余阶段走两级取消。
+      if (
+        this.renderer.state.phase === 'confirming' ||
+        !matchesKey(data, Key.ctrl('c'))
+      ) {
+        return undefined;
+      }
+      this.#handleInterrupt();
+      return { consume: true };
+    });
     const onSigint = (): void => this.#handleInterrupt();
     process.on('SIGINT', onSigint);
     this.renderer.start();
@@ -84,7 +85,7 @@ export class TuiApp {
       let promptWasRendered = false;
       while (!this.#exitRequested) {
         if (prompt.length === 0) {
-          const answer = await this.#readPrompt();
+          const answer = await this.renderer.readPrompt();
           if (answer === null) break;
           prompt = answer.trim();
           promptWasRendered = true;
@@ -110,10 +111,11 @@ export class TuiApp {
         promptWasRendered = false;
       }
     } finally {
-      this.#readline?.close();
-      this.#readline = undefined;
+      this.renderer.cancelPrompt();
+      this.interaction.close();
       this.renderer.finish();
       process.removeListener('SIGINT', onSigint);
+      removeInputListener();
       unsubscribe();
       this.interaction.setInterruptHandler(() => undefined);
       this.#session = undefined;
@@ -130,12 +132,14 @@ export class TuiApp {
     );
     if (decision === 'exit') {
       this.#exitRequested = true;
-      this.#safeWrite('\n');
-      this.#readline?.close();
+      this.renderer.cancelPrompt();
       return;
     }
     this.#lastRunningInterruptMs = now;
     this.#session?.abort(new Error('Interrupted by user'));
+    // 外部 kill -SIGINT 不经过 pi-tui input listener；确认 Promise 也必须释放，
+    // 否则权限链会永远等在 confirm，无法观察已经 aborted 的 signal。
+    this.interaction.cancelConfirmation();
     if (decision === 'abortAndExit') {
       this.#exitRequested = true;
       this.#requestProcessExit(130);
@@ -146,39 +150,6 @@ export class TuiApp {
       level: 'info',
       message: '正在取消；1.5 秒内再次按 Ctrl+C 将退出。',
     });
-  }
-
-  async #readPrompt(): Promise<string | null> {
-    this.renderer.prepareForInput();
-    const readline = createInterface({
-      input: this.#input,
-      output: this.#output,
-      terminal: true,
-    });
-    this.#readline = readline;
-    const onSigint = (): void => this.#handleInterrupt();
-    readline.once('SIGINT', onSigint);
-    try {
-      const answer = await readline.question('> ');
-      this.renderer.acceptReadlinePrompt(answer);
-      return answer;
-    } catch (error) {
-      if (this.#exitRequested) return null;
-      if (/ctrl\+d|end of input/iu.test(errorMessage(error))) return null;
-      throw error;
-    } finally {
-      readline.removeListener('SIGINT', onSigint);
-      readline.close();
-      if (this.#readline === readline) this.#readline = undefined;
-    }
-  }
-
-  #safeWrite(value: string): void {
-    try {
-      this.#output.write(value);
-    } catch {
-      // 输出关闭不应改变 agent 的取消与清理语义。
-    }
   }
 }
 

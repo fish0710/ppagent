@@ -869,10 +869,11 @@ CI 使用 `ubuntu-latest` / `macos-latest` 矩阵。macOS job 会真正执行 `s
 **定位**：TUI 是 `UIEvent` 的消费者和 `Interaction` 的实现，只调用 `AgentSession.prompt()`、
 `abort()`、`subscribe()`、`setInteraction()` 所表达的边界，不读取 context，也不认识 loop 和 tools。
 
-**渲染契约**：不使用 alternate screen。模型正文按换行提交到 append-only transcript；未完成的半行、
-prefill/decode 指标和最多三个并发工具留在固定 live 区。终端驱动只使用 `CSI n A` 上移和
-`CSI 0 J` 清到末尾后整体重画 live，不实现屏幕 diff。所有模型/工具文本先去除终端控制字符；
-裁剪按 grapheme 和终端列宽处理 CJK、emoji，不画需要左右对齐的边框。
+**渲染契约**：使用 `@earendil-works/pi-tui` 的 `TuiMainScreen`，明确不使用 `TuiAltScreen`。模型正文
+按换行提交到 append-only transcript；未完成的半行、prefill/decode 指标和最多三个并发工具留在
+底部 live 区。pi-tui 负责 main-screen 差分、CSI 2026 同步输出、终端 resize 和 scrollback；项目不再
+维护 ANSI 光标算法。所有模型/工具文本仍先去除终端控制字符，CJK/emoji 的列宽、grapheme 裁剪和
+文本换行改用 pi-tui 的 `visibleWidth`、`sliceByColumn`、`truncateToWidth`、`wrapTextWithAnsi`。
 
 **纯函数地基**：`reduceTuiState(state, action, nowMs)` 从 UIEvent 派生 phase、transcript 和 live 数据；
 `renderTuiFrame(state, width, nowMs)` 只返回 transcript/live 行。M8 的 NDJSON 可直接作为 fixture 回放，
@@ -882,9 +883,11 @@ prefill/decode 指标和最多三个并发工具留在固定 live 区。终端�
 `resourceSource`。TUI 因此能显示静默 prefill 时长、流中近似 tok/s、一轮结束后的 usage 精确 tok/s、
 上下文比例、压缩触发原因/采样器和准入拒绝重试建议。字段均为可选，既有 JSONL 消费方保持兼容。
 
-**输入与取消**：空闲时才创建 readline；调用 `session.prompt()` 前立即关闭。confirm 先提交 live 半行，
-再用 raw mode 读取单个 `y/n`，第一行展示工具 `describe(args)` 的真实摘要。运行中第一次 Ctrl+C
-调用 `session.abort()`，第二次（1.5 秒内）请求进程退出；空闲 Ctrl+C 直接退出。取消端到端实测会
+**输入与取消**：`ProcessTerminal` 在 TUI 生命周期内统一持有 raw mode，pi-tui `Input` 负责 prompt
+编辑、CJK/IME 光标和 bracketed paste；不再创建 readline。confirm 先提交 live 半行，再临时注册
+模态 input listener 读取 `y/n`，第一行展示工具 `describe(args)` 的真实摘要。由于 raw mode 下 Ctrl+C
+是输入字节而非 OS 信号，统一用 `matchesKey` 路由：运行中第一次调用 `session.abort()`，第二次
+（1.5 秒内）请求退出，空闲时直接退出；外部发送的 SIGINT 仍有进程监听器兜底。取消端到端实测会
 杀掉 `sleep 300 & sleep 300` 的整个进程组，无孤儿进程。
 
 ```bash
@@ -906,7 +909,7 @@ node bin/agent.js --tui --provider lmstudio --model qwen3.6-27b "分析当前仓
 | `SpanExporter` | M6 | 打到 stderr | Laminar | M11 |
 | `CompactPolicy` 的 resource 输入 | M5 | `undefined` | 接入探针快照 | M10 |
 | 工具调用形态 | M3 | 仅原生 tool calling | 验证本地服务的原生 tool calling 兼容性 | M11 |
-| `Interaction` | M1 | 非交互自动拒绝 | CLI readline / TUI raw-mode 单键确认 | M7 / TUI 阶段（已接入） |
+| `Interaction` | M1 | 非交互自动拒绝 | CLI readline / pi-tui input listener 单键确认 | M7 / TUI 阶段（已接入） |
 
 **桩的两条纪律**
 

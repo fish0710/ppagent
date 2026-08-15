@@ -778,7 +778,7 @@ function fauxAgentTurns(prompt: string): FauxTurn[] {
       argumentChunkSize: 1,
     }),
     textTurn(
-      'package.json declares runtime dependencies on @earendil-works/pi-ai and gpt-tokenizer.',
+      'package.json declares runtime dependencies on @earendil-works/pi-ai, @earendil-works/pi-tui, @huggingface/tokenizers, and gpt-tokenizer.',
       { chunkSize: 8 },
     ),
   ];
