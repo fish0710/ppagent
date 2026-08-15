@@ -6,8 +6,10 @@ import {
   createPiAiProvider,
   findModel,
   isTerminalEvent,
+  validateNativeToolCalling,
   textTurn,
   toolCallTurn,
+  toolCallsTurn,
   type Context,
   type FauxTurn,
   type ModelRef,
@@ -21,8 +23,11 @@ import {
 } from '../dist/core/store/index.js';
 import {
   ConsoleSpanExporter,
+  CompositeSpanExporter,
+  LaminarSpanExporter,
   createTraceContext,
 } from '../dist/core/telemetry/index.js';
+import { createTokenCounter } from '../dist/core/context/index.js';
 import {
   loadAgentConfig,
   createConfiguredProvider,
@@ -33,11 +38,15 @@ import {
 } from '../dist/agent/index.js';
 import {
   CliInteraction,
+  AutoApproveInteraction,
   NonInteractiveInteraction,
   createCliEventRenderer,
   readCliInput,
 } from '../dist/app/cli/index.js';
-import { PassthroughSandbox } from '../dist/core/sandbox/index.js';
+import {
+  MacOsSandbox,
+  PassthroughSandbox,
+} from '../dist/core/sandbox/index.js';
 import {
   createBuiltinToolRegistry,
   executeToolCall,
@@ -47,6 +56,7 @@ import type {
   Message,
   StoreRecord,
   ToolContext,
+  SpanExporter,
 } from '../dist/core/types.js';
 import { readCustomSmokeEnvironment } from './smoke-env.js';
 
@@ -77,6 +87,7 @@ interface AgentArgs {
   resume: boolean;
   trace: boolean;
   json: boolean;
+  permissionMode: 'interactive' | 'deny' | 'allow';
 }
 
 function printVersion(): void {
@@ -86,10 +97,11 @@ function printVersion(): void {
 function printHelp(): void {
   process.stdout.write(`Usage:
   agent --version
-  agent [--provider faux|anthropic|openai|custom] [--model MODEL] [--max-turns N]
+  agent [--provider faux|anthropic|openai|custom|lmstudio|llamacpp] [--model MODEL] [--max-turns N]
         [--config PATH] [--max-tokens N] [--session ID] [--resume] [--trace]
-        [--json] [PROMPT]
-  agent --smoke [--provider faux|anthropic|openai|custom] [--model MODEL] [PROMPT]
+        [--json] [--permission-mode interactive|deny|allow] [PROMPT]
+  agent --smoke [--provider faux|anthropic|openai|custom|lmstudio|llamacpp] [--model MODEL] [PROMPT]
+  agent --check-compat [--provider custom|lmstudio|llamacpp] --model MODEL
   agent --tool read|write|edit|bash [--args JSON]
 
 Custom provider environment:
@@ -98,6 +110,7 @@ Custom provider environment:
 
 Input/output:
   With no PROMPT, read it from stdin. --json writes one UIEvent per stdout line.
+  --permission-mode allow is only for an already isolated benchmark/container.
 `);
 }
 
@@ -115,11 +128,25 @@ async function main(): Promise<void> {
     await runTool(parseToolArgs(args));
     return;
   }
+  if (args.includes('--check-compat')) {
+    await runCompatibility(parseSmokeArgs(args));
+    return;
+  }
   if (args.includes('--smoke')) {
     await runSmoke(parseSmokeArgs(args));
     return;
   }
   await runAgent(await parseAgentArgs(args));
+}
+
+async function runCompatibility(args: SmokeArgs): Promise<void> {
+  if (!['custom', 'lmstudio', 'llamacpp'].includes(args.provider)) {
+    throw new Error('--check-compat only supports custom, lmstudio, or llamacpp');
+  }
+  const { provider, model } = createSmokeProvider(args);
+  const report = await validateNativeToolCalling(provider, model);
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  if (!report.ok) process.exitCode = 1;
 }
 
 async function runSmoke(smokeArgs: SmokeArgs): Promise<void> {
@@ -177,18 +204,50 @@ async function runAgent(args: AgentArgs): Promise<void> {
   const { provider, model } = createConfiguredProvider(config.provider, {
     fauxTurns: fauxAgentTurns(args.prompt),
   });
+  const tokenCounterSelection = await createTokenCounter({
+    model,
+    ...(config.context.tokenizer === undefined
+      ? {}
+      : { source: config.context.tokenizer }),
+    localFilesOnly: config.context.tokenizerLocalOnly,
+  });
   const stored = await prepareSession(args, model);
-  const spanExporter = args.trace ? new ConsoleSpanExporter() : undefined;
+  const exporters: SpanExporter[] = [];
+  if (args.trace) exporters.push(new ConsoleSpanExporter());
+  if (config.telemetry.laminarApiKey !== undefined) {
+    exporters.push(
+      new LaminarSpanExporter({
+        apiKey: config.telemetry.laminarApiKey,
+        endpoint: config.telemetry.laminarEndpoint,
+        serviceName: config.telemetry.serviceName,
+        serviceVersion: pkg.version,
+      }),
+    );
+  }
+  const spanExporter =
+    exporters.length === 0
+      ? undefined
+      : exporters.length === 1
+        ? exporters[0]
+        : new CompositeSpanExporter(exporters);
   const renderer = createCliEventRenderer(args.json ? 'json' : 'print');
+  if (tokenCounterSelection.warning !== undefined) {
+    renderer.render({
+      type: 'notify',
+      level: 'warn',
+      message: tokenCounterSelection.warning,
+    });
+  }
   const interaction = createAgentInteraction(args.json, (event) => {
     renderer.render({ type: 'notify', ...event });
-  });
+  }, args.permissionMode);
   const session = createAgentSession({
     config,
     provider,
     model,
     cwd: process.cwd(),
     interaction,
+    tokenCounter: tokenCounterSelection.counter,
     context: stored.context,
     ...(stored.previousSummary === undefined
       ? {}
@@ -308,7 +367,10 @@ async function runTool(args: ToolArgs): Promise<void> {
       {
         admission: new StubAdmissionController(),
         permissions: new InteractivePermissionPolicy(),
-        sandbox: new PassthroughSandbox(),
+        sandbox:
+          process.platform === 'darwin'
+            ? new MacOsSandbox({ cwd: process.cwd() })
+            : new PassthroughSandbox(),
       },
       { maxResultChars: 8_000, toolTimeoutMs: 30_000 },
     );
@@ -325,7 +387,7 @@ function parseSmokeArgs(args: string[]): SmokeArgs {
   const promptParts: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === undefined || arg === '--smoke') continue;
+    if (arg === undefined || arg === '--smoke' || arg === '--check-compat') continue;
     if (arg === '--provider' || arg === '--model') {
       const value = args[index + 1];
       if (value === undefined || value.startsWith('-')) {
@@ -357,6 +419,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
   let resume = false;
   let trace = false;
   let json = false;
+  let permissionMode: AgentArgs['permissionMode'] = 'interactive';
   const promptParts: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -379,7 +442,8 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
       arg === '--max-turns' ||
       arg === '--max-tokens' ||
       arg === '--session' ||
-      arg === '--config'
+      arg === '--config' ||
+      arg === '--permission-mode'
     ) {
       const value = args[index + 1];
       if (value === undefined || value.startsWith('-')) {
@@ -393,6 +457,11 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
         maxTokens = positiveInteger(value, '--max-tokens');
       } else if (arg === '--config') {
         configPath = value;
+      } else if (arg === '--permission-mode') {
+        if (value !== 'interactive' && value !== 'deny' && value !== 'allow') {
+          throw new Error('--permission-mode must be interactive, deny, or allow');
+        }
+        permissionMode = value;
       } else {
         session = value;
       }
@@ -426,6 +495,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
     resume,
     trace,
     json,
+    permissionMode,
   };
 }
 
@@ -435,8 +505,15 @@ function createAgentInteraction(
     level: 'info' | 'warn' | 'error';
     message: string;
   }) => void,
+  permissionMode: AgentArgs['permissionMode'] = 'interactive',
 ) {
+  if (permissionMode === 'allow') {
+    return new AutoApproveInteraction(
+      notify ?? (({ level, message }) => process.stderr.write(`[${level}] ${message}\n`)),
+    );
+  }
   if (
+    permissionMode === 'deny' ||
     forceNonInteractive ||
     process.stdin.isTTY !== true ||
     process.stderr.isTTY !== true
@@ -544,25 +621,42 @@ function createSmokeProvider(args: SmokeArgs): {
     };
   }
 
-  if (args.provider === 'custom') {
+  if (
+    args.provider === 'custom' ||
+    args.provider === 'lmstudio' ||
+    args.provider === 'llamacpp'
+  ) {
     if (args.model === undefined) {
       throw new Error('--model is required for the custom smoke test');
     }
-    const { baseUrl, apiKey } = readCustomSmokeEnvironment(process.env);
+    const environment =
+      args.provider === 'custom'
+        ? readCustomSmokeEnvironment(process.env)
+        : {
+            baseUrl:
+              process.env['PPAGENT_CUSTOM_BASE_URL'] ??
+              (args.provider === 'lmstudio'
+                ? 'http://localhost:1234/v1'
+                : 'http://localhost:8080/v1'),
+            apiKey: process.env['PPAGENT_CUSTOM_API_KEY'],
+          };
+    const { baseUrl, apiKey } = environment;
     const provider = createPiAiProvider({
       providers: [],
       customProviders: [
         {
-          id: 'custom',
+          id: args.provider,
           baseUrl,
           models: [{ id: args.model }],
         },
       ],
-      ...(apiKey === undefined ? {} : { apiKeys: { custom: apiKey } }),
+      ...(apiKey === undefined
+        ? {}
+        : { apiKeys: { [args.provider]: apiKey } }),
     });
     return {
       provider,
-      model: selectModel(provider, 'custom', args.model),
+      model: selectModel(provider, args.provider, args.model),
     };
   }
 
@@ -570,6 +664,29 @@ function createSmokeProvider(args: SmokeArgs): {
 }
 
 function fauxAgentTurns(prompt: string): FauxTurn[] {
+  if (/并行分析/iu.test(prompt)) {
+    return [
+      toolCallsTurn({
+        calls: [
+          {
+            id: `faux-subagent-a-${crypto.randomUUID()}`,
+            name: 'spawn_subagent',
+            rawArguments: JSON.stringify({ task: '独立分析任务 A' }),
+            argumentChunkSize: 1,
+          },
+          {
+            id: `faux-subagent-b-${crypto.randomUUID()}`,
+            name: 'spawn_subagent',
+            rawArguments: JSON.stringify({ task: '独立分析任务 B' }),
+            argumentChunkSize: 1,
+          },
+        ],
+      }),
+      textTurn('并行子任务受到资源准入限制；已改用串行策略继续。', {
+        chunkSize: 8,
+      }),
+    ];
+  }
   if (/\bsleep\s+300\b/iu.test(prompt)) {
     return [
       toolCallTurn({
@@ -594,6 +711,17 @@ function fauxAgentTurns(prompt: string): FauxTurn[] {
         'The file was not deleted because permission was denied. I will leave it unchanged.',
         { chunkSize: 8 },
       ),
+    ];
+  }
+  if (/修改\s*\/etc\/hosts/iu.test(prompt)) {
+    return [
+      toolCallTurn({
+        id: `faux-write-hosts-${crypto.randomUUID()}`,
+        name: 'write',
+        rawArguments: JSON.stringify({ path: '/etc/hosts', content: 'blocked' }),
+        argumentChunkSize: 1,
+      }),
+      textTurn('The protected system file was not modified.'),
     ];
   }
   return [

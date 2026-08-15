@@ -1,6 +1,7 @@
 import { PassThrough, Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import {
+  AutoApproveInteraction,
   CliInteraction,
   NonInteractiveInteraction,
   createCliEventRenderer,
@@ -9,6 +10,18 @@ import {
 import type { UIEvent } from '../src/core/types.js';
 
 describe('CLI interaction', () => {
+  it('auto-approves only through the explicit benchmark interaction', async () => {
+    const notifications: Array<{ level: string; message: string }> = [];
+    const interaction = new AutoApproveInteraction((event) => notifications.push(event));
+
+    await expect(interaction.confirm({ message: 'write result.txt' })).resolves.toBe(true);
+    expect(notifications).toEqual([
+      {
+        level: 'warn',
+        message: 'Explicit auto-approve mode allowed permission: write result.txt',
+      },
+    ]);
+  });
   it('shows a concrete permission summary and accepts n as denial', async () => {
     let output = '';
     const input = new PassThrough();

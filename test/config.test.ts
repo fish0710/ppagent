@@ -38,6 +38,7 @@ describe('agent config', () => {
         PPAGENT_MODEL: 'env-model',
         PPAGENT_CUSTOM_API_KEY: 'env-secret',
         PPAGENT_MAX_TURNS: '3',
+        PPAGENT_SANDBOX_NETWORK_ALLOWLIST: 'localhost:1234,*:443',
       },
       cli: {
         provider: { model: 'cli-model' },
@@ -54,6 +55,7 @@ describe('agent config', () => {
       },
       loop: { maxTurns: 4, turnTimeoutMs: 120_000 },
       tools: { maxConcurrency: 1 },
+      sandbox: { networkAllowlist: ['localhost:1234', '*:443'] },
     });
     expect(Object.getPrototypeOf(config)).toBe(Object.prototype);
   });
@@ -92,6 +94,23 @@ describe('agent config', () => {
       id: 'custom',
       model: 'qwen-local',
       baseUrl: 'http://localhost:11434/v1',
+    });
+  });
+
+  it('uses the custom credential domain for local provider aliases', () => {
+    expect(
+      configFromEnvironment(
+        {
+          OPENAI_API_KEY: 'must-not-leak',
+          PPAGENT_CUSTOM_API_KEY: 'local-key',
+          PPAGENT_CUSTOM_BASE_URL: 'http://host.docker.internal:1234/v1',
+        },
+        'lmstudio',
+      ).provider,
+    ).toEqual({
+      id: 'lmstudio',
+      apiKey: 'local-key',
+      baseUrl: 'http://host.docker.internal:1234/v1',
     });
   });
 

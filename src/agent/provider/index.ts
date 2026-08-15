@@ -31,29 +31,30 @@ export function createConfiguredProvider(
     };
   }
 
-  if (config.id === 'custom') {
+  if (isLocalProvider(config.id)) {
     if (config.model === undefined) {
       throw new Error('provider.model is required for the custom provider');
     }
-    if (config.baseUrl === undefined) {
+    const baseUrl = config.baseUrl ?? defaultLocalBaseUrl(config.id);
+    if (baseUrl === undefined) {
       throw new Error('provider.baseUrl is required for the custom provider');
     }
     const provider = createPiAiProvider({
       providers: [],
       customProviders: [
         {
-          id: 'custom',
-          baseUrl: config.baseUrl,
+          id: config.id,
+          baseUrl,
           models: [{ id: config.model }],
         },
       ],
       ...(config.apiKey === undefined
         ? {}
-        : { apiKeys: { custom: config.apiKey } }),
+        : { apiKeys: { [config.id]: config.apiKey } }),
     });
     return {
       provider,
-      model: requiredModel(provider, 'custom', config.model),
+      model: requiredModel(provider, config.id, config.model),
     };
   }
 
@@ -75,6 +76,16 @@ export function createConfiguredProvider(
   }
 
   throw new Error(`Unsupported provider: ${config.id}`);
+}
+
+function isLocalProvider(value: string): boolean {
+  return value === 'custom' || value === 'lmstudio' || value === 'llamacpp';
+}
+
+function defaultLocalBaseUrl(provider: string): string | undefined {
+  if (provider === 'lmstudio') return 'http://localhost:1234/v1';
+  if (provider === 'llamacpp') return 'http://localhost:8080/v1';
+  return undefined;
 }
 
 function isBuiltinProvider(value: string): value is PiAiBuiltinProvider {

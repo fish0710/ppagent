@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { StubAdmissionController } from '../src/agent/admission/index.js';
 import { StubPermissionPolicy } from '../src/agent/permissions/index.js';
 import {
@@ -318,6 +318,64 @@ describe('agent loop', () => {
     expect(result.context.messages).toHaveLength(4);
     expect(persistedMessages).toHaveLength(1);
     expect(persistedMessages[0]?.[0]).toMatchObject({ role: 'assistant' });
+  });
+
+  it('samples resource pressure per turn and records a memory-triggered compact', async () => {
+    const provider = new FauxProvider({ turns: [textTurn('done')] });
+    const events: UIEvent[] = [];
+    const tokenCounter = new O200kTokenCounter();
+    const exporter = new InMemorySpanExporter();
+    const snapshot = vi.fn(async () => ({
+      memPressure: 0.9,
+      memAvailableMB: 1_024,
+      gpuBusy: false,
+      activeSubagents: 0,
+      sampledAt: 10,
+    }));
+    const base = loopOptions(provider, new ToolRegistry(), events);
+
+    const result = await runAgentLoop({
+      ...base,
+      context: {
+        messages: Array.from({ length: 8 }, (_, index) => ({
+          role: 'user' as const,
+          content: `history ${index} ${'memory context '.repeat(8)}`,
+          timestamp: index,
+        })),
+      },
+      telemetry: { exporter },
+      compaction: {
+        tokenCounter,
+        policy: new ThresholdCompactPolicy({
+          config: {
+            compactThreshold: 1,
+            memPressureThreshold: 0.75,
+            keepRecentMessages: 2,
+          },
+          tokenCounter,
+        }),
+        summarizer: new StructuralSummarizer({ tokenCounter }),
+        contextWindow: 1_000_000,
+        targetTokens: 40,
+        resourceProbe: { snapshot },
+      },
+    });
+
+    expect(result.reason).toBe('stop');
+    expect(snapshot).toHaveBeenCalledOnce();
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'compacted', trigger: 'memory' }),
+    );
+    expect(exporter.spans).toContainEqual(
+      expect.objectContaining({
+        name: 'context.compact',
+        attrs: expect.objectContaining({
+          'resource.mem_pressure': 0.9,
+          'resource.mem_available_mb': 1_024,
+          'context.trigger': 'memory',
+        }),
+      }),
+    );
   });
 
   it('exports parented turn, model, and tool spans', async () => {

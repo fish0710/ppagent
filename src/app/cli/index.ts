@@ -60,11 +60,17 @@ export class PrintCliEventRenderer implements CliEventRenderer {
           `\n[context:compacted] ${event.trigger} ${event.tokensBefore} → ${event.tokensAfter} tokens\n`,
         );
         break;
+      case 'admission_denied':
+        this.#stderr.write(
+          `\n[admission:denied] ${event.reason}${
+            event.retryAfterMs === null ? '' : ` (retry after ${event.retryAfterMs}ms)`
+          }\n`,
+        );
+        break;
       case 'turn_start':
       case 'thinking_delta':
       case 'permission_request':
       case 'permission_resolved':
-      case 'admission_denied':
       case 'turn_end':
       case 'loop_end':
         break;
@@ -238,6 +244,43 @@ export class NonInteractiveInteraction implements Interaction {
     level: 'info' | 'warn' | 'error';
     message: string;
   }): void {
+    this.#notify(event);
+  }
+}
+
+/** 隔离评测环境显式启用的无头批准策略；默认 CLI 永远不会自行选择它。 */
+export class AutoApproveInteraction implements Interaction {
+  readonly #notify: (event: {
+    level: 'info' | 'warn' | 'error';
+    message: string;
+  }) => void;
+
+  constructor(
+    notify: (event: {
+      level: 'info' | 'warn' | 'error';
+      message: string;
+    }) => void,
+  ) {
+    this.#notify = notify;
+  }
+
+  async confirm(request: Parameters<Interaction['confirm']>[0]): Promise<boolean> {
+    this.#notify({
+      level: 'warn',
+      message: `Explicit auto-approve mode allowed permission: ${request.message}`,
+    });
+    return true;
+  }
+
+  async ask(): Promise<null> {
+    return null;
+  }
+
+  async select(): Promise<null> {
+    return null;
+  }
+
+  notify(event: Parameters<Interaction['notify']>[0]): void {
     this.#notify(event);
   }
 }

@@ -269,6 +269,39 @@ describe('executeTool', () => {
     });
   });
 
+  it('does not ask twice when one privileged approval also covers an escalatable path', async () => {
+    const check = vi.fn(async () => 'allow' as const);
+    const execute = vi.fn(async () => textOutput('allowed once'));
+    const tool: Tool = {
+      ...orderedTool([]),
+      prepareSandbox: () => ({
+        allowed: false,
+        reason: 'outside workspace',
+        escalatable: true,
+      }),
+      execute,
+    };
+
+    const output = await executeTool(
+      tool,
+      { value: 'ok' },
+      CONTEXT,
+      {
+        admission: new StubAdmissionController(),
+        permissions: { check },
+        sandbox: new PassthroughSandbox(),
+      },
+      OPTIONS,
+    );
+
+    expect(check).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(
+      { value: 'ok' },
+      expect.objectContaining({ cwd: CONTEXT.cwd }),
+    );
+    expect(output).toMatchObject({ isError: false });
+  });
+
   it('turns execution exceptions and timeouts into tool errors', async () => {
     const throwing: Tool = {
       ...orderedTool([]),

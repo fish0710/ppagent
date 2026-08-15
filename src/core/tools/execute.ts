@@ -58,6 +58,7 @@ export async function executeTool(
     );
   }
 
+  let admissionReserved = false;
   if (tool.requiresAdmission === true) {
     const decision = await deps.admission.canSpawnSubagent();
     if (!decision.ok) {
@@ -73,45 +74,56 @@ export async function executeTool(
         ),
       );
     }
+    admissionReserved = true;
   }
 
-  if (tool.privileged === true) {
-    const decision = await deps.permissions.check(
-      permissionRequest(tool, validated.value),
-      ctx.interaction,
-    );
-    if (decision === 'deny') return finish(errorOutput('User denied tool execution.'));
-  }
-
-  let prepared;
   try {
-    prepared = tool.prepareSandbox(validated.value, ctx, deps.sandbox);
-  } catch (error) {
-    return finish(
-      errorOutput(`Sandbox preparation failed: ${errorMessage(error)}`),
-    );
-  }
-  if (!prepared.allowed) {
-    if (!prepared.escalatable) {
+    let permissionGranted = false;
+    if (tool.privileged === true) {
+      const decision = await deps.permissions.check(
+        permissionRequest(tool, validated.value),
+        ctx.interaction,
+      );
+      if (decision === 'deny') {
+        return finish(errorOutput('User denied tool execution.'));
+      }
+      permissionGranted = true;
+    }
+
+    let prepared;
+    try {
+      prepared = tool.prepareSandbox(validated.value, ctx, deps.sandbox);
+    } catch (error) {
       return finish(
-        errorOutput(`Sandbox denied tool execution: ${prepared.reason}`),
+        errorOutput(`Sandbox preparation failed: ${errorMessage(error)}`),
       );
     }
-    const decision = await deps.permissions.check(
-      {
-        ...permissionRequest(tool, validated.value),
-        sandboxReason: prepared.reason,
-      },
-      ctx.interaction,
-    );
-    if (decision === 'deny') {
-      return finish(errorOutput(`Sandbox exception denied: ${prepared.reason}`));
+    if (!prepared.allowed) {
+      if (!prepared.escalatable) {
+        return finish(
+          errorOutput(`Sandbox denied tool execution: ${prepared.reason}`),
+        );
+      }
+      if (!permissionGranted) {
+        const decision = await deps.permissions.check(
+          {
+            ...permissionRequest(tool, validated.value),
+            sandboxReason: prepared.reason,
+          },
+          ctx.interaction,
+        );
+        if (decision === 'deny') {
+          return finish(errorOutput(`Sandbox exception denied: ${prepared.reason}`));
+        }
+      }
+      prepared = { allowed: true, args: validated.value };
     }
-    prepared = { allowed: true, args: validated.value };
-  }
 
-  const raw = await runTool(tool, prepared.args, ctx, options.toolTimeoutMs);
-  return finish(raw);
+    const raw = await runTool(tool, prepared.args, ctx, options.toolTimeoutMs);
+    return finish(raw);
+  } finally {
+    if (admissionReserved) deps.admission.releaseSubagent?.();
+  }
 }
 
 export async function executeToolCall(

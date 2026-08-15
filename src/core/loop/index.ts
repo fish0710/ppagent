@@ -9,6 +9,7 @@ import type {
   Provider,
   ReadonlyContext,
   ResourceSnapshot,
+  ResourceProbe,
   SpanExporter,
   StopReason,
   Summarizer,
@@ -61,6 +62,8 @@ export interface AgentLoopCompactionOptions {
   previousSummary?: Message;
   targetTokens?: number;
   resource?: ResourceSnapshot;
+  /** 每轮压缩决策前按需采样；实现负责缓存昂贵的平台调用。 */
+  resourceProbe?: ResourceProbe;
 }
 
 export interface AgentLoopPersistence {
@@ -163,6 +166,25 @@ export async function runAgentLoop(
         const compactSpan = spans?.start('context.compact', compactTrace);
         let compacted: CompactResult | null;
         try {
+          let resource = options.compaction.resource;
+          if (options.compaction.resourceProbe !== undefined) {
+            try {
+              resource = await options.compaction.resourceProbe.snapshot();
+              compactSpan?.setAttribute('resource.mem_pressure', resource.memPressure);
+              compactSpan?.setAttribute(
+                'resource.mem_available_mb',
+                resource.memAvailableMB,
+              );
+              compactSpan?.setAttribute('resource.gpu_busy', resource.gpuBusy);
+              compactSpan?.setAttribute(
+                'resource.active_subagents',
+                resource.activeSubagents,
+              );
+            } catch (error) {
+              // 探针失败退回 token-only 决策；资源遥测不能让 agent 本身失败。
+              compactSpan?.setAttribute('resource.probe_error', errorMessage(error));
+            }
+          }
           compacted = await contextManager.compactIfNeeded({
             policy: options.compaction.policy,
             summarizer: options.compaction.summarizer,
@@ -170,9 +192,9 @@ export async function runAgentLoop(
               options.compaction.contextWindow ?? options.model.contextWindow,
             signal: control.signal,
             trace: compactTrace,
-            ...(options.compaction.resource === undefined
+            ...(resource === undefined
               ? {}
-              : { resource: options.compaction.resource }),
+              : { resource }),
             ...(options.compaction.targetTokens === undefined
               ? {}
               : { targetTokens: options.compaction.targetTokens }),

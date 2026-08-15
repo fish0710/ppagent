@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mergeAgentConfig } from '../src/agent/config/index.js';
 import { createAgentSession } from '../src/agent/session.js';
+import { StubAdmissionController } from '../src/agent/admission/index.js';
 import { NonInteractiveInteraction } from '../src/app/cli/index.js';
 import {
   FauxProvider,
@@ -28,6 +29,135 @@ afterEach(async () => {
 });
 
 describe('AgentSession', () => {
+  it('runs the default subagent session and returns its final report to the parent', async () => {
+    const provider = new FauxProvider({
+      turns: [
+        toolCallTurn({
+          id: 'spawn-default',
+          name: 'spawn_subagent',
+          rawArguments: '{"task":"inspect module C"}',
+          argumentChunkSize: 1,
+        }),
+        textTurn('module C report from child'),
+        textTurn('parent incorporated module C report'),
+      ],
+    });
+    const model = provider.listModels()[0];
+    if (model === undefined) throw new Error('Missing faux model');
+    const session = createAgentSession({
+      config: mergeAgentConfig(),
+      provider,
+      model,
+      cwd: process.cwd(),
+      interaction: interaction(async () => false),
+      admission: new StubAdmissionController(),
+    });
+
+    const result = await session.prompt('delegate with the default runner');
+
+    expect(result).toMatchObject({ reason: 'stop', turns: 2 });
+    expect(session.context.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'toolResult',
+        toolCallId: 'spawn-default',
+        isError: false,
+        content: [{ type: 'text', text: 'module C report from child' }],
+      }),
+    );
+    expect(session.context.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'parent incorporated module C report' }],
+    });
+  });
+
+  it('registers spawn_subagent, returns its report, and emits admission denials', async () => {
+    const acceptedProvider = new FauxProvider({
+      turns: [
+        toolCallTurn({
+          id: 'spawn-ok',
+          name: 'spawn_subagent',
+          rawArguments: '{"task":"inspect module A"}',
+          argumentChunkSize: 1,
+        }),
+        textTurn('used delegated report'),
+      ],
+    });
+    const model = acceptedProvider.listModels()[0];
+    if (model === undefined) throw new Error('Missing faux model');
+    const runSubagent = vi.fn(async () => ({ content: 'module A is healthy' }));
+    const accepted = createAgentSession({
+      config: mergeAgentConfig(),
+      provider: acceptedProvider,
+      model,
+      cwd: process.cwd(),
+      interaction: interaction(async () => false),
+      subagentRunner: runSubagent,
+    });
+
+    await expect(accepted.prompt('delegate')).resolves.toMatchObject({ reason: 'stop' });
+    expect(runSubagent).toHaveBeenCalledWith(
+      'inspect module A',
+      expect.objectContaining({ cwd: process.cwd() }),
+    );
+    expect(accepted.context.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'toolResult',
+        toolCallId: 'spawn-ok',
+        isError: false,
+        content: [{ type: 'text', text: 'module A is healthy' }],
+      }),
+    );
+
+    const deniedProvider = new FauxProvider({
+      turns: [
+        toolCallTurn({
+          id: 'spawn-denied',
+          name: 'spawn_subagent',
+          rawArguments: '{"task":"inspect module B"}',
+        }),
+        textTurn('falling back to serial work'),
+      ],
+    });
+    const deniedModel = deniedProvider.listModels()[0];
+    if (deniedModel === undefined) throw new Error('Missing faux model');
+    const denied = createAgentSession({
+      config: mergeAgentConfig(),
+      provider: deniedProvider,
+      model: deniedModel,
+      cwd: process.cwd(),
+      interaction: interaction(async () => false),
+      admission: new StubAdmissionController({
+        ok: false,
+        reason: 'memory pressure is high; continue serially',
+        retryAfterMs: null,
+      }),
+      subagentRunner: runSubagent,
+    });
+    const events: UIEvent[] = [];
+    denied.subscribe((event) => events.push(event));
+
+    await denied.prompt('delegate under pressure');
+
+    expect(events).toContainEqual({
+      type: 'admission_denied',
+      reason: 'memory pressure is high; continue serially',
+      retryAfterMs: null,
+    });
+    expect(runSubagent).toHaveBeenCalledOnce();
+    expect(denied.context.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'toolResult',
+        toolCallId: 'spawn-denied',
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: 'Admission denied: memory pressure is high; continue serially Do not retry; use a serial approach.',
+          },
+        ],
+      }),
+    );
+  });
   it('round-trips a denied privileged tool result back to the model', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'ppagent-session-'));
     temporaryDirectories.push(cwd);

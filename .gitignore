@@ -5,3 +5,5 @@ bin/smoke-env.js
 bin/agent.js.map
 *.tsbuildinfo
 .ppagent/
+__pycache__/
+*.pyc

@@ -416,7 +416,12 @@ export interface AdmissionDecision {
 }
 
 export interface AdmissionController {
+  /**
+   * 成功决定同时预留一个 subagent 槽位；调用方在工具结束后必须调用
+   * releaseSubagent。把检查与预留放在同一临界区，避免并发调用一起穿透。
+   */
   canSpawnSubagent(): Promise<AdmissionDecision>;
+  releaseSubagent?(): void;
 }
 
 // ============================================================================
@@ -485,6 +490,8 @@ export interface CompactSignals {
  */
 export interface TokenCounter {
   readonly id: string;
+  /** approximate 必须显式标注，不能把不匹配的词表结果冒充精确 token 数。 */
+  readonly precision: 'exact' | 'approximate';
   countText(text: string): number;
   countMessages(messages: readonly Message[]): number;
   countContext(context: ReadonlyContext): number;

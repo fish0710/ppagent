@@ -16,6 +16,31 @@ export interface AgentContextConfig extends ContextConfig {
   /** CLI/测试可覆盖模型声明的窗口。 */
   contextWindow?: number;
   summaryTargetRatio: number;
+  /** 本地 tokenizer 目录或 Hugging Face repo id。 */
+  tokenizer?: string;
+  tokenizerLocalOnly: boolean;
+}
+
+export interface AgentSandboxConfig {
+  /**
+   * sandbox-exec 允许的出站 TCP 端点。SBPL 只稳定支持 localhost 或通配
+   * host，因此值形如 `localhost:1234`、`*:443`；默认空数组即禁止网络。
+   */
+  networkAllowlist: string[];
+}
+
+export interface AgentResourceConfig {
+  probeCacheMs: number;
+  minSubagentMemMB: number;
+  maxSubagents: number;
+  lowMemoryRetryAfterMs: number;
+  busyGpuRetryAfterMs: number;
+}
+
+export interface AgentTelemetryConfig {
+  laminarApiKey?: string;
+  laminarEndpoint: string;
+  serviceName: string;
 }
 
 export interface AgentConfig {
@@ -23,6 +48,9 @@ export interface AgentConfig {
   loop: LoopConfig;
   context: AgentContextConfig;
   tools: ToolsConfig;
+  sandbox: AgentSandboxConfig;
+  resource: AgentResourceConfig;
+  telemetry: AgentTelemetryConfig;
 }
 
 export interface AgentConfigSource {
@@ -30,6 +58,9 @@ export interface AgentConfigSource {
   loop?: Partial<LoopConfig>;
   context?: Partial<AgentContextConfig>;
   tools?: Partial<ToolsConfig>;
+  sandbox?: Partial<AgentSandboxConfig>;
+  resource?: Partial<AgentResourceConfig>;
+  telemetry?: Partial<AgentTelemetryConfig>;
 }
 
 export interface LoadAgentConfigOptions {
@@ -46,11 +77,24 @@ const DEFAULT_CONFIG: AgentConfig = {
     memPressureThreshold: 0.75,
     keepRecentMessages: 6,
     summaryTargetRatio: 0.4,
+    tokenizerLocalOnly: false,
   },
   tools: {
     maxResultChars: 8_000,
     maxConcurrency: 4,
     toolTimeoutMs: 30_000,
+  },
+  sandbox: { networkAllowlist: [] },
+  resource: {
+    probeCacheMs: 2_000,
+    minSubagentMemMB: 2_048,
+    maxSubagents: 2,
+    lowMemoryRetryAfterMs: 5_000,
+    busyGpuRetryAfterMs: 10_000,
+  },
+  telemetry: {
+    laminarEndpoint: 'https://api.lmnr.ai',
+    serviceName: 'ppagent',
   },
 };
 
@@ -83,7 +127,15 @@ export async function readAgentConfigFile(
     throw new Error(`Invalid agent config JSON: ${errorMessage(error)}`);
   }
   if (!isRecord(value)) throw new Error('Agent config root must be an object');
-  for (const section of ['provider', 'loop', 'context', 'tools'] as const) {
+  for (const section of [
+    'provider',
+    'loop',
+    'context',
+    'tools',
+    'sandbox',
+    'resource',
+    'telemetry',
+  ] as const) {
     const candidate = value[section];
     if (candidate !== undefined && !isRecord(candidate)) {
       throw new Error(`Agent config ${section} must be an object`);
@@ -105,7 +157,7 @@ export function configFromEnvironment(
     model: nonEmpty(env['PPAGENT_MODEL']),
     // 凭证与 endpoint 按 provider 分域，切换 provider 时不会误用旧值。
     baseUrl:
-      providerId === 'custom'
+      isLocalProvider(providerId)
         ? nonEmpty(env['PPAGENT_CUSTOM_BASE_URL'])
         : undefined,
     apiKey: providerApiKey(env, providerId),
@@ -120,17 +172,37 @@ export function configFromEnvironment(
     memPressureThreshold: envNumber(env, 'PPAGENT_MEM_PRESSURE_THRESHOLD'),
     keepRecentMessages: envNumber(env, 'PPAGENT_KEEP_RECENT_MESSAGES'),
     summaryTargetRatio: envNumber(env, 'PPAGENT_SUMMARY_TARGET_RATIO'),
+    tokenizer: nonEmpty(env['PPAGENT_TOKENIZER']),
+    tokenizerLocalOnly: envBoolean(env, 'PPAGENT_TOKENIZER_LOCAL_ONLY'),
   });
   const tools = compactObject<Partial<ToolsConfig>>({
     maxResultChars: envNumber(env, 'PPAGENT_MAX_RESULT_CHARS'),
     maxConcurrency: envNumber(env, 'PPAGENT_MAX_TOOL_CONCURRENCY'),
     toolTimeoutMs: envNumber(env, 'PPAGENT_TOOL_TIMEOUT_MS'),
   });
+  const sandbox = compactObject<Partial<AgentSandboxConfig>>({
+    networkAllowlist: commaSeparated(env['PPAGENT_SANDBOX_NETWORK_ALLOWLIST']),
+  });
+  const resource = compactObject<Partial<AgentResourceConfig>>({
+    probeCacheMs: envNumber(env, 'PPAGENT_RESOURCE_CACHE_MS'),
+    minSubagentMemMB: envNumber(env, 'PPAGENT_MIN_SUBAGENT_MEM_MB'),
+    maxSubagents: envNumber(env, 'PPAGENT_MAX_SUBAGENTS'),
+    lowMemoryRetryAfterMs: envNumber(env, 'PPAGENT_LOW_MEMORY_RETRY_MS'),
+    busyGpuRetryAfterMs: envNumber(env, 'PPAGENT_BUSY_GPU_RETRY_MS'),
+  });
+  const telemetry = compactObject<Partial<AgentTelemetryConfig>>({
+    laminarApiKey: nonEmpty(env['LMNR_PROJECT_API_KEY']),
+    laminarEndpoint: nonEmpty(env['PPAGENT_LAMINAR_ENDPOINT']),
+    serviceName: nonEmpty(env['PPAGENT_TELEMETRY_SERVICE_NAME']),
+  });
   return {
     provider,
     ...(Object.keys(loop).length === 0 ? {} : { loop }),
     ...(Object.keys(context).length === 0 ? {} : { context }),
     ...(Object.keys(tools).length === 0 ? {} : { tools }),
+    ...(Object.keys(sandbox).length === 0 ? {} : { sandbox }),
+    ...(Object.keys(resource).length === 0 ? {} : { resource }),
+    ...(Object.keys(telemetry).length === 0 ? {} : { telemetry }),
   };
 }
 
@@ -150,6 +222,9 @@ export function mergeAgentConfig(
     Object.assign(merged.loop, compactObject(source.loop ?? {}));
     Object.assign(merged.context, compactObject(source.context ?? {}));
     Object.assign(merged.tools, compactObject(source.tools ?? {}));
+    Object.assign(merged.sandbox, compactObject(source.sandbox ?? {}));
+    Object.assign(merged.resource, compactObject(source.resource ?? {}));
+    Object.assign(merged.telemetry, compactObject(source.telemetry ?? {}));
   }
   validateConfig(merged);
   return structuredClone(merged);
@@ -171,12 +246,38 @@ function validateConfig(config: AgentConfig): void {
   positiveInteger(config.tools.maxResultChars, 'tools.maxResultChars');
   positiveInteger(config.tools.maxConcurrency, 'tools.maxConcurrency');
   positiveInteger(config.tools.toolTimeoutMs, 'tools.toolTimeoutMs');
+  if (!Array.isArray(config.sandbox.networkAllowlist)) {
+    throw new Error('sandbox.networkAllowlist must be an array');
+  }
+  for (const endpoint of config.sandbox.networkAllowlist) {
+    if (typeof endpoint !== 'string' || endpoint.trim().length === 0) {
+      throw new Error('sandbox.networkAllowlist entries must be non-empty strings');
+    }
+  }
+  nonNegativeInteger(config.resource.probeCacheMs, 'resource.probeCacheMs');
+  positiveInteger(config.resource.minSubagentMemMB, 'resource.minSubagentMemMB');
+  positiveInteger(config.resource.maxSubagents, 'resource.maxSubagents');
+  nonNegativeInteger(
+    config.resource.lowMemoryRetryAfterMs,
+    'resource.lowMemoryRetryAfterMs',
+  );
+  optionalNonEmptyString(config.telemetry.laminarApiKey, 'telemetry.laminarApiKey');
+  optionalNonEmptyString(config.telemetry.laminarEndpoint, 'telemetry.laminarEndpoint');
+  optionalNonEmptyString(config.telemetry.serviceName, 'telemetry.serviceName');
+  nonNegativeInteger(
+    config.resource.busyGpuRetryAfterMs,
+    'resource.busyGpuRetryAfterMs',
+  );
   if (config.context.contextWindow !== undefined) {
     positiveInteger(config.context.contextWindow, 'context.contextWindow');
   }
   ratio(config.context.compactThreshold, 'context.compactThreshold');
   ratio(config.context.memPressureThreshold, 'context.memPressureThreshold');
   ratio(config.context.summaryTargetRatio, 'context.summaryTargetRatio');
+  optionalNonEmptyString(config.context.tokenizer, 'context.tokenizer');
+  if (typeof config.context.tokenizerLocalOnly !== 'boolean') {
+    throw new Error('context.tokenizerLocalOnly must be a boolean');
+  }
 }
 
 function providerApiKey(
@@ -185,6 +286,8 @@ function providerApiKey(
 ): string | undefined {
   switch (providerId) {
     case 'custom':
+    case 'lmstudio':
+    case 'llamacpp':
       return nonEmpty(env['PPAGENT_CUSTOM_API_KEY']);
     case 'openai':
       return nonEmpty(env['OPENAI_API_KEY']);
@@ -193,6 +296,10 @@ function providerApiKey(
     default:
       return undefined;
   }
+}
+
+function isLocalProvider(providerId: string): boolean {
+  return providerId === 'custom' || providerId === 'lmstudio' || providerId === 'llamacpp';
 }
 
 function envNumber(
@@ -204,6 +311,17 @@ function envNumber(
   const value = Number(raw);
   if (!Number.isFinite(value)) throw new Error(`${name} must be a number`);
   return value;
+}
+
+function envBoolean(
+  env: NodeJS.ProcessEnv,
+  name: string,
+): boolean | undefined {
+  const raw = nonEmpty(env[name]);
+  if (raw === undefined) return undefined;
+  if (/^(?:1|true|yes|on)$/iu.test(raw)) return true;
+  if (/^(?:0|false|no|off)$/iu.test(raw)) return false;
+  throw new Error(`${name} must be a boolean`);
 }
 
 function compactObject<T extends object>(value: object): T {
@@ -218,6 +336,12 @@ function positiveInteger(value: number, name: string): void {
   }
 }
 
+function nonNegativeInteger(value: number, name: string): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+}
+
 function ratio(value: number, name: string): void {
   if (!Number.isFinite(value) || value <= 0 || value > 1) {
     throw new Error(`${name} must be in (0, 1]`);
@@ -227,6 +351,13 @@ function ratio(value: number, name: string): void {
 function nonEmpty(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+}
+
+function commaSeparated(value: string | undefined): string[] | undefined {
+  const raw = nonEmpty(value);
+  if (raw === undefined) return undefined;
+  const entries = raw.split(',').map((entry) => entry.trim()).filter(Boolean);
+  return entries.length === 0 ? undefined : entries;
 }
 
 function stringValue(value: unknown): string | undefined {

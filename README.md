@@ -19,10 +19,11 @@
 - M6：层级 span、console exporter 与端到端干净取消已完成
 - M7：AgentSession 装配、配置合并与人工确认反向通道已完成
 - M8：print/JSONL CLI、stdin prompt 与非交互安全拒绝已完成
-- 其余里程碑见[在线介绍页](https://fish0710.github.io/ppagent/#roadmap)
+- M9：macOS `sandbox-exec` 隔离、路径越界与网络白名单已完成
+- M10：macOS 资源探针、内存/GPU 准入和 `spawn_subagent` 已完成
+- M11：本地 provider 别名、原生 tool calling 探针、匹配 tokenizer、Laminar 与 Harbor 适配器已完成
 
-目前已有可供脚本调用的 M8 CLI，但还没有可安装的发行版本；macOS 系统沙箱和真实资源
-探针仍属于后续里程碑。
+M0–M11 的开发路线已经贯通；目前仍是源码构建使用，还没有可安装的发行版本。
 
 ## 本地开发
 
@@ -89,8 +90,14 @@ node bin/agent.js "删除 /tmp/test.txt"
 ```
 
 配置的文件、环境变量和命令行解析只发生在 `agent/` 装配层；`core/` 不读取这些外部来源。
-特权工具使用真实人工确认策略，非交互环境会明确记录后自动拒绝。当前
-`PassthroughSandbox` 仍是 M9 之前的沙箱桩，因此确认允许的命令只应在可信工作目录中执行。
+特权工具使用真实人工确认策略，非交互环境会明确记录后自动拒绝。macOS 默认使用
+`sandbox-exec`：只允许向工作目录和临时目录写入，系统目录不可写，网络默认禁止。
+需要联网的工具可通过逗号分隔的白名单显式开放，例如：
+
+```bash
+PPAGENT_SANDBOX_NETWORK_ALLOWLIST='localhost:1234,*:443' \
+  node bin/agent.js "运行需要联网的构建"
+```
 
 ### 验证上下文压缩与恢复
 
@@ -116,6 +123,19 @@ ps -ax -o pid,ppid,pgid,command | grep 'sleep 300'
 tool.execute` 层级及耗时。取消验收的 faux 分支会执行一个包含后台孙进程的
 `sleep 300 & sleep 300`；Ctrl+C 后整个进程组都应消失。
 
+设置 `LMNR_PROJECT_API_KEY` 后，同一批 span 还会通过 OTLP/HTTP JSON 发送到 Laminar；
+`PPAGENT_LAMINAR_ENDPOINT` 和 `PPAGENT_TELEMETRY_SERVICE_NAME` 可覆盖 endpoint 与 service。
+
+### 验证资源准入
+
+`spawn_subagent` 在真正启动子 session 前读取带 2 秒缓存的资源快照。下面用不可能满足的
+内存阈值稳定复现拒绝；模型会收到两个带原因的工具结果并回退到串行策略：
+
+```bash
+PPAGENT_MIN_SUBAGENT_MEM_MB=999999999 \
+  node bin/agent.js --json "并行分析两个独立任务"
+```
+
 ### 验证本地 OpenAI-compatible 服务
 
 `PPAGENT_CUSTOM_BASE_URL` 必须是完整的 API 根地址；LM Studio 和
@@ -128,18 +148,34 @@ PPAGENT_CUSTOM_BASE_URL=http://localhost:11434/v1 \
 PPAGENT_CUSTOM_BASE_URL=http://localhost:11434/v1 \
   node bin/agent.js --provider custom --model <model-id> \
   "读取 package.json 并告诉我依赖了哪些包"
+
+# LM Studio / llama.cpp 别名提供默认的 localhost:1234/v1 与 localhost:8080/v1
+node bin/agent.js --provider lmstudio --model qwen3.6-27b "读取 package.json"
+
+# 在投入 agent loop 前验证 endpoint/model/chat-template 的原生工具调用协议
+node bin/agent.js --check-compat --provider lmstudio --model qwen3.6-27b
 ```
 
-第二条是当前开发验收路径，使用真实人工确认策略和 `PassthroughSandbox`；只应在可信
-提示词与可控工作目录中运行。系统级沙箱在 M9 落地。
+本地模型按模型 ID 选择 tokenizer。`qwen3.6-27b` 自动映射到
+`Qwen/Qwen3.6-27B`；其他模型应通过 `PPAGENT_TOKENIZER` 指向 Hugging Face repo id
+或包含 `tokenizer.json`、`tokenizer_config.json` 的本地目录。无法匹配时会明确标记为
+approximate，而不会把 o200k 计数伪装成本地模型的精确 token 数。
 
 只有服务端启用了认证时才设置 `PPAGENT_CUSTOM_API_KEY`。custom provider 不会读取
 `OPENAI_API_KEY`，避免把真实 OpenAI key 发送给本地服务。
 
 PPAgent 只支持具备 OpenAI-compatible 原生 tool calling 能力的模型，不提供把工具调用
 编码进普通文本的 prompted 降级路径。这个能力也取决于服务端使用的 chat template；
-配置 custom endpoint 即表示它满足该前提。M4 已对可识别的文本化工具调用给出明确诊断，
-M11 再按 endpoint、model 和 chat template 做兼容性验证。
+配置 custom endpoint 即表示它满足该前提。M4 会拦截可识别的文本化工具调用；M11 的
+`--check-compat` 会主动要求服务端产生一次原生工具调用，并校验流事件、终态 call id 与参数。
+
+### Harbor / Terminal-Bench
+
+Harbor installed-agent 适配器位于 `benchmark/harbor/ppagent.py`，固定消费 NDJSON UIEvent，
+并把 token、admission、compact 与 loop 原因写回结果元数据。完整命令、本地 worktree 挂载和
+与内置 `pi` agent 使用相同模型/任务的对照方式见
+[benchmark/harbor/README.md](benchmark/harbor/README.md)。自动评测仅应在隔离容器中显式使用
+`--permission-mode allow`；普通 CLI 的默认权限策略没有改变。
 
 ## 设计文档
 

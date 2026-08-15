@@ -4,6 +4,8 @@
 >
 > 版本 v1 · 建设顺序：自底向上 · 云端模型先行，本地能力留桩
 
+**实现状态（2026-08-15）**：M0–M11 已全部落地；下文保留原始建设顺序，并在各里程碑后记录最终实现与验收结果。
+
 ---
 
 ## 0. 怎么用这份文档
@@ -768,6 +770,12 @@ node bin/agent.js "把 /etc/hosts 改一下"   # 沙箱拦截 → 人工确认 �
 
 **要点**：`sandbox-exec` 已被 Apple 标记为 deprecated（弃用）但仍可用。把它藏在 `Sandbox` 接口后面，将来换成 Endpoint Security 框架或容器方案时只改一个文件。这也是为什么 M3 就要定义这个接口，哪怕当时只有 passthrough 实现。
 
+**完成情况**：`MacOsSandbox` 已成为 Darwin 默认实现。文件工具会解析现有符号链接祖先，防止
+workspace 内链接绕到外部；bash 始终包装进独立的 `sandbox-exec` profile。profile 默认拒绝网络，
+只按 `PPAGENT_SANDBOX_NETWORK_ALLOWLIST` 开放 `localhost:PORT` / `*:PORT`，写入仅限 workspace、
+临时目录与 `/dev/null`。实际验收覆盖 workspace 写入成功、未授权本地端口失败、精确白名单端口成功；
+`修改 /etc/hosts` 的 CLI 链路会产生 permission 请求并把拒绝作为工具结果回传模型。
+
 ---
 
 ### M10 · 资源探针与准入（卖点落地）
@@ -803,6 +811,13 @@ node bin/agent.js "并行分析这十个模块"
 
 **注意**：探针采样有成本，`powermetrics` 尤其重。加缓存（比如 2 秒内复用上次快照），否则每次工具调用都探测一遍会明显拖慢循环。
 
+**完成情况**：macOS 内存采样优先读取 `memory_pressure -Q`，失败时回退 `vm_stat`；系统值按配置
+缓存 2 秒，进程内 inference/subagent 计数保持实时。GPU 使用 `activeInference` 作为无需 sudo 的软信号。
+`ResourceAdmissionController` 串行化“检查 + 预留”，保证并行工具不会同时抢到最后一个槽位；
+`spawn_subagent` 启动共享 provider、资源、沙箱和 trace 的真实子 session，但不允许继续嵌套 spawn。
+compact 每轮读取同一资源快照并把压力与采样值写入 span。CLI 用超高内存阈值实测两个并行请求均
+产生 `admission_denied`，父模型收到原因后正常改走串行策略。
+
 ---
 
 ### M11 · 本地模型接入与对照评测
@@ -823,6 +838,22 @@ node bin/agent.js "并行分析这十个模块"
 node bin/agent.js --provider lmstudio --model qwen3.6-27b "在这个仓库里加一个 xxx 功能"
 # 跑通，且 trace 里能看到内存压力触发的 compact
 ```
+
+**完成情况**：
+
+- `custom`、`lmstudio`、`llamacpp` 共用独立的 `PPAGENT_CUSTOM_*` 配置域；后两者分别提供
+  `localhost:1234/v1` 和 `localhost:8080/v1` 默认 endpoint，无 key 时不发送 Authorization。
+- `--check-compat` 主动下发一个确定性工具定义，只有流中原生 tool call、终态 id、参数 token 和
+  `stopReason: toolUse` 全部一致才通过；假 OpenAI-compatible SSE 服务的 CLI 探针已实跑通过。
+- `createTokenCounter` 为 Qwen3.6 自动选择 `Qwen/Qwen3.6-27B`，使用零推理依赖的
+  `@huggingface/tokenizers` 加载 repo 或本地目录；真实 tokenizer.json 验证通过。未知模型只使用明确
+  标记为 approximate 的保守计数器。
+- Laminar exporter 使用 OTLP/HTTP JSON `/v1/traces`、Bearer auth、批量 flush 与有限重试；发送失败
+  保持遥测旁路语义，不覆盖任务结果。
+- `benchmark.harbor.ppagent:PPAgent` 已完成 Terminal-Bench 2.0 单任务端到端 smoke：1 trial、0 Harbor
+  exception，NDJSON 与 token/admission/compact/loop 元数据均进入结果；faux reward 为 0 是预期的
+  适配器验收，不代表真实模型质量。真实 Qwen 与 pi 的分数对照需在提供 LM Studio token 的评测机上
+  用同一模型、任务过滤器和 attempt 数运行。
 
 ---
 

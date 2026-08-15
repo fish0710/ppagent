@@ -254,3 +254,52 @@ JSON 消费方仅靠 stdout 就能看到 permission、notify 和 tool 事件，p
 仍存在于当前祖先路径时才标记 `[Circular]`。测试同时覆盖共享引用和 `obj.self = obj`。
 
 ---
+
+### 9.1 路径前缀不是沙箱边界
+
+**风险**：只判断字符串是否以 workspace 开头，会把 `/work/project-evil` 当成子目录；只对目标做
+`resolve()` 又会被 workspace 内指向外部的符号链接绕过。bash 若只做命令字符串检查，子进程还能在
+运行时构造任意路径和网络请求。
+
+**修法**：路径边界比较必须要求“完全相等或 root + path separator”；对尚未存在的写目标向上寻找
+最近存在祖先，`realpath` 后再拼回剩余路径。文件工具做事前判定，bash 则始终进入系统级
+`sandbox-exec` profile。`sandbox-exec` 已弃用这一事实必须封装在 `Sandbox` 实现里，不能扩散到工具。
+
+### 10.1 准入检查和槽位预留必须是一个原子动作
+
+**风险**：两个并发 `spawn_subagent` 都先读 `activeSubagents=0`，随后一起通过，实际并发数会超过上限。
+仅缓存整个资源快照又会让活跃计数延迟两秒，继续放大超发。
+
+**修法**：用一个异步 gate 串行化“读取快照 → 判断 → `beginSubagent()`”；只有内存等昂贵系统采样
+缓存，`activeInference` 和 `activeSubagents` 在返回快照时实时覆盖。执行器用 `finally` 释放预留，
+工具校验、沙箱或子 session 任何失败都不能泄漏槽位。
+
+### 11.1 原生工具调用能力属于 endpoint 组合
+
+**风险**：同一个模型权重换一个服务端 chat template，可能从原生 tool call 退化为普通文本。
+模型名或 `supportsNativeToolCalling: true` 无法证明运行时协议真的成立。
+
+**修法**：上线前主动下发确定性的兼容性工具，要求服务端返回一个原生调用；同时校验流式 call、
+终态 call id、参数 token 和 `toolUse` 停止原因。模型或 chat template 变化后必须重跑探针。
+
+### 11.2 为分词引入推理 runtime 会拖垮评测冷启动
+
+**风险**：`@huggingface/transformers` 能加载 tokenizer，但会连带安装 onnxruntime 等数百 MB 依赖。
+Harbor 每个冷容器都付这笔成本，第一次真实 Terminal-Bench smoke 因此触发 setup timeout。
+
+**修法**：换成 Hugging Face 的零依赖 `@huggingface/tokenizers`，只读取
+`tokenizer.json` / `tokenizer_config.json`，不安装推理 runtime。显式本地目录加载失败直接报错；
+自动推断失败才回退到带 `precision: approximate` 标签的 UTF-8 估算。
+
+### 11.3 Benchmark adapter 必须把安装环境当成发布包环境
+
+**风险**：Harbor 会在另一个 cwd 导入自定义 agent，并把源码复制到没有 `.git` 的容器目录。
+依赖当前 cwd 的 Python import、仓库专用 `prepare` hook、把 host `node_modules` 复制进 Linux，都会让
+agent 在真正运行前失败。强行 `cd $HOME` 还会让 coding agent 离开 Harbor 的任务目录。
+
+**修法**：启动 Harbor 时显式设置仓库 `PYTHONPATH`；本地挂载只打包源码并排除 `.git/dist/node_modules`，
+容器内使用 `npm ci --ignore-scripts` 后显式 build。agent.run 保留 Harbor 设置的 cwd，stdout 只写
+NDJSON，stderr 单独保存。适配器 smoke 必须以“进入 verifier、0 Harbor exception”为完成条件，不能只
+看 class 能 import 或 setup 命令能启动。
+
+---

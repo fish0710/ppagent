@@ -1,4 +1,5 @@
 export * from './provider.js';
+export * from './compatibility.js';
 export * from './faux.js';
 export {
   createPiAiProvider,
