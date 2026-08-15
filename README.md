@@ -156,10 +156,20 @@ node bin/agent.js --provider lmstudio --model qwen3.6-27b "读取 package.json"
 node bin/agent.js --check-compat --provider lmstudio --model qwen3.6-27b
 ```
 
-本地模型按模型 ID 选择 tokenizer。`qwen3.6-27b` 自动映射到
-`Qwen/Qwen3.6-27B`；其他模型应通过 `PPAGENT_TOKENIZER` 指向 Hugging Face repo id
-或包含 `tokenizer.json`、`tokenizer_config.json` 的本地目录。无法匹配时会明确标记为
-approximate，而不会把 o200k 计数伪装成本地模型的精确 token 数。
+本地模型按模型 ID 选择 tokenizer。`qwen3.6-27b` 会推断出
+`Qwen/Qwen3.6-27B`，但默认 `PPAGENT_TOKENIZER_LOCAL_ONLY=true`：agent 不会因为运行本地模型而
+隐式访问外网。推荐把 `PPAGENT_TOKENIZER` 指向包含 `tokenizer.json`、
+`tokenizer_config.json` 的本地目录。未找到本地词表时会明确降级为 approximate，而不会把 o200k
+计数伪装成本地模型的精确 token 数。
+
+确实需要从 Hugging Face repo 下载时必须显式开启，并受超时限制：
+
+```bash
+PPAGENT_TOKENIZER=Qwen/Qwen3.6-27B \
+PPAGENT_TOKENIZER_LOCAL_ONLY=false \
+PPAGENT_TOKENIZER_TIMEOUT_MS=30000 \
+  node bin/agent.js --provider lmstudio --model qwen3.6-27b "读取 package.json"
+```
 
 只有服务端启用了认证时才设置 `PPAGENT_CUSTOM_API_KEY`。custom provider 不会读取
 `OPENAI_API_KEY`，避免把真实 OpenAI key 发送给本地服务。

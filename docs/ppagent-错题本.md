@@ -302,4 +302,15 @@ agent 在真正运行前失败。强行 `cd $HOME` 还会让 coding agent 离开
 NDJSON，stderr 单独保存。适配器 smoke 必须以“进入 verifier、0 Harbor exception”为完成条件，不能只
 看 class 能 import 或 setup 命令能启动。
 
+### 11.4 本地模型不能默认产生隐藏网络请求
+
+**风险**：根据模型名推断出 Hugging Face repo 后直接 `fetch(tokenizer.json)`，会让“本地、离线”的
+主路径隐式依赖公网；没有 deadline 时，断网还会把 session 创建永久挂起。若下载逻辑留在
+`core/context`，配置/环境与纯计数边界也重新耦合。
+
+**修法**：`core` 只负责选择 tokenizer id 和消费注入的 `TokenizerLike`，文件与网络 IO 移到
+`agent/tokenizer/`。默认 `tokenizerLocalOnly=true`，本地目录未命中就明确降级 approximate；只有用户
+显式设为 false 才允许下载，且共享 AbortController deadline。dependency-cruiser 和源码守卫测试共同
+防止文件依赖或裸 `fetch()` 再次进入 core tokenizer。
+
 ---

@@ -813,6 +813,8 @@ node bin/agent.js "并行分析这十个模块"
 
 **完成情况**：macOS 内存采样优先读取 `memory_pressure -Q`，失败时回退 `vm_stat`；系统值按配置
 缓存 2 秒，进程内 inference/subagent 计数保持实时。GPU 使用 `activeInference` 作为无需 sudo 的软信号。
+两条内存公式量纲不同，因此每个 `ResourceSnapshot` 都带 `source: memory_pressure | vm_stat`，并写入
+`context.compact` span 的 `resource.sample_source`；降级不再静默。
 `ResourceAdmissionController` 串行化“检查 + 预留”，保证并行工具不会同时抢到最后一个槽位；
 `spawn_subagent` 启动共享 provider、资源、沙箱和 trace 的真实子 session，但不允许继续嵌套 spawn。
 compact 每轮读取同一资源快照并把压力与采样值写入 span。CLI 用超高内存阈值实测两个并行请求均
@@ -846,14 +848,19 @@ node bin/agent.js --provider lmstudio --model qwen3.6-27b "在这个仓库里加
 - `--check-compat` 主动下发一个确定性工具定义，只有流中原生 tool call、终态 id、参数 token 和
   `stopReason: toolUse` 全部一致才通过；假 OpenAI-compatible SSE 服务的 CLI 探针已实跑通过。
 - `createTokenCounter` 为 Qwen3.6 自动选择 `Qwen/Qwen3.6-27B`，使用零推理依赖的
-  `@huggingface/tokenizers` 加载 repo 或本地目录；真实 tokenizer.json 验证通过。未知模型只使用明确
-  标记为 approximate 的保守计数器。
+  `@huggingface/tokenizers` 加载 repo 或本地目录；真实 tokenizer.json 验证通过。文件与网络加载都在
+  `agent/tokenizer/` 装配层，core 只接收注入的 loader。默认 local-only；联网必须显式关闭
+  `PPAGENT_TOKENIZER_LOCAL_ONLY` 并受 `PPAGENT_TOKENIZER_TIMEOUT_MS` 限制。未知或离线未命中模型只
+  使用明确标记为 approximate 的保守计数器。
 - Laminar exporter 使用 OTLP/HTTP JSON `/v1/traces`、Bearer auth、批量 flush 与有限重试；发送失败
   保持遥测旁路语义，不覆盖任务结果。
 - `benchmark.harbor.ppagent:PPAgent` 已完成 Terminal-Bench 2.0 单任务端到端 smoke：1 trial、0 Harbor
   exception，NDJSON 与 token/admission/compact/loop 元数据均进入结果；faux reward 为 0 是预期的
   适配器验收，不代表真实模型质量。真实 Qwen 与 pi 的分数对照需在提供 LM Studio token 的评测机上
   用同一模型、任务过滤器和 attempt 数运行。
+
+CI 使用 `ubuntu-latest` / `macos-latest` 矩阵。macOS job 会真正执行 `sandbox-exec` 的允许/拒绝路径，
+并通过系统 `memory_pressure` 或 `vm_stat` 采样；这些平台能力不再依赖 Ubuntu 上的 skip 假绿。
 
 ---
 

@@ -14,10 +14,15 @@ PYTHONPATH="$(pwd)" harbor run -d terminal-bench@2.0 \
   -a benchmark.harbor.ppagent:PPAgent \
   -m lmstudio/qwen3.6-27b \
   --ae PPAGENT_CUSTOM_BASE_URL=http://host.docker.internal:1234/v1 \
-  --ae PPAGENT_TOKENIZER=Qwen/Qwen3.6-27B \
+  --ae PPAGENT_TOKENIZER=/tokenizer \
   --allow-agent-host host.docker.internal \
+  --mounts '[{"type":"bind","source":"/absolute/path/to/tokenizer","target":"/tokenizer","read_only":true}]' \
   -n 1
 ```
+
+Tokenizer loading is offline by default. The example mounts a directory containing
+`tokenizer.json` and `tokenizer_config.json`; a benchmark must not acquire a hidden
+Hugging Face network dependency merely because its model server is local.
 
 The adapter deliberately passes `--permission-mode allow`: Harbor already isolates each
 task in its own container. Normal PPAgent CLI runs remain interactive/default-deny.
