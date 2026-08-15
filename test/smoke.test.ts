@@ -22,4 +22,14 @@ describe('M0 smoke', () => {
     ) as { type?: string };
     expect(pkg.type).toBe('module');
   });
+
+  it('core tokenizer 不直接执行文件或网络 IO', () => {
+    const src = readFileSync(
+      join(ROOT, '..', 'src', 'core', 'context', 'tokenizer.ts'),
+      'utf-8',
+    );
+    expect(src).not.toMatch(/from ['"]node:(?:fs|path)/u);
+    expect(src).not.toContain('@huggingface/tokenizers');
+    expect(src).not.toMatch(/\bfetch\s*\(/u);
+  });
 });

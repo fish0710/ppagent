@@ -33,6 +33,15 @@ describe('token counter selection', () => {
     expect(selection.counter.countText('你好')).toBe(2);
   });
 
+  it('does not perform IO when no assembly-layer loader is injected', async () => {
+    const selection = await createTokenCounter({
+      model: model('lmstudio', 'qwen3.6-27b'),
+    });
+
+    expect(selection.counter).toBeInstanceOf(ApproximateUtf8TokenCounter);
+    expect(selection.warning).toContain('No tokenizer loader was injected');
+  });
+
   it('uses an honestly labeled approximation for an unknown local tokenizer', async () => {
     const selection = await createTokenCounter({
       model: model('custom', 'unknown-gguf'),

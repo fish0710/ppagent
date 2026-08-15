@@ -29,6 +29,13 @@ module.exports = {
       from: { path: '^src/core', pathNot: '^src/core/llm/pi-ai\\.ts$' },
       to: { path: 'node_modules/@earendil-works/pi-ai' },
     },
+    {
+      name: 'core-tokenizer-no-io',
+      severity: 'error',
+      comment: 'tokenizer 选择与计数保持纯计算；文件/网络加载只能由 agent/ 注入',
+      from: { path: '^src/core/context/tokenizer\.ts$' },
+      to: { path: '^(node:|node_modules/@huggingface/tokenizers)' },
+    },
   ],
   options: {
     doNotFollow: { path: 'node_modules' },

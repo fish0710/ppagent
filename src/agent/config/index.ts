@@ -19,6 +19,7 @@ export interface AgentContextConfig extends ContextConfig {
   /** 本地 tokenizer 目录或 Hugging Face repo id。 */
   tokenizer?: string;
   tokenizerLocalOnly: boolean;
+  tokenizerTimeoutMs: number;
 }
 
 export interface AgentSandboxConfig {
@@ -77,7 +78,9 @@ const DEFAULT_CONFIG: AgentConfig = {
     memPressureThreshold: 0.75,
     keepRecentMessages: 6,
     summaryTargetRatio: 0.4,
-    tokenizerLocalOnly: false,
+    // 本地模型默认不得产生隐式外网请求；联网下载必须由用户显式开启。
+    tokenizerLocalOnly: true,
+    tokenizerTimeoutMs: 30_000,
   },
   tools: {
     maxResultChars: 8_000,
@@ -174,6 +177,7 @@ export function configFromEnvironment(
     summaryTargetRatio: envNumber(env, 'PPAGENT_SUMMARY_TARGET_RATIO'),
     tokenizer: nonEmpty(env['PPAGENT_TOKENIZER']),
     tokenizerLocalOnly: envBoolean(env, 'PPAGENT_TOKENIZER_LOCAL_ONLY'),
+    tokenizerTimeoutMs: envNumber(env, 'PPAGENT_TOKENIZER_TIMEOUT_MS'),
   });
   const tools = compactObject<Partial<ToolsConfig>>({
     maxResultChars: envNumber(env, 'PPAGENT_MAX_RESULT_CHARS'),
@@ -278,6 +282,10 @@ function validateConfig(config: AgentConfig): void {
   if (typeof config.context.tokenizerLocalOnly !== 'boolean') {
     throw new Error('context.tokenizerLocalOnly must be a boolean');
   }
+  positiveInteger(
+    config.context.tokenizerTimeoutMs,
+    'context.tokenizerTimeoutMs',
+  );
 }
 
 function providerApiKey(

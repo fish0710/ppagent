@@ -34,6 +34,7 @@ import {
   createAgentSession,
   StubAdmissionController,
   InteractivePermissionPolicy,
+  createAgentTokenizerLoader,
   type AgentConfigSource,
 } from '../dist/agent/index.js';
 import {
@@ -210,6 +211,9 @@ async function runAgent(args: AgentArgs): Promise<void> {
       ? {}
       : { source: config.context.tokenizer }),
     localFilesOnly: config.context.tokenizerLocalOnly,
+    load: createAgentTokenizerLoader({
+      timeoutMs: config.context.tokenizerTimeoutMs,
+    }),
   });
   const stored = await prepareSession(args, model);
   const exporters: SpanExporter[] = [];

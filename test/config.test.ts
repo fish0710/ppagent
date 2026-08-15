@@ -56,6 +56,10 @@ describe('agent config', () => {
       loop: { maxTurns: 4, turnTimeoutMs: 120_000 },
       tools: { maxConcurrency: 1 },
       sandbox: { networkAllowlist: ['localhost:1234', '*:443'] },
+      context: {
+        tokenizerLocalOnly: true,
+        tokenizerTimeoutMs: 30_000,
+      },
     });
     expect(Object.getPrototypeOf(config)).toBe(Object.prototype);
   });
@@ -111,6 +115,21 @@ describe('agent config', () => {
       id: 'lmstudio',
       apiKey: 'local-key',
       baseUrl: 'http://host.docker.internal:1234/v1',
+    });
+  });
+
+  it('requires an explicit opt-in before tokenizer network loading', () => {
+    expect(mergeAgentConfig().context.tokenizerLocalOnly).toBe(true);
+    expect(
+      mergeAgentConfig(
+        configFromEnvironment({
+          PPAGENT_TOKENIZER_LOCAL_ONLY: 'false',
+          PPAGENT_TOKENIZER_TIMEOUT_MS: '45000',
+        }),
+      ).context,
+    ).toMatchObject({
+      tokenizerLocalOnly: false,
+      tokenizerTimeoutMs: 45_000,
     });
   });
 

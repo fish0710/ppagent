@@ -1,7 +1,4 @@
 import { countTokens } from 'gpt-tokenizer';
-import { readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { Tokenizer } from '@huggingface/tokenizers';
 import type {
   ContentBlock,
   ReadonlyContext,
@@ -126,7 +123,18 @@ export async function createTokenCounter(
       warning: `No matching tokenizer is configured for ${options.model.provider}/${options.model.id}; using an explicitly approximate UTF-8 counter. Set PPAGENT_TOKENIZER to a local tokenizer directory or Hugging Face tokenizer id.`,
     };
   }
-  const load = options.load ?? loadHuggingFaceTokenizer;
+  const load = options.load;
+  if (load === undefined) {
+    const reason = 'No tokenizer loader was injected by the assembly layer.';
+    if (explicit !== undefined) {
+      throw new Error(`Failed to load configured tokenizer ${source}: ${reason}`);
+    }
+    return {
+      counter: new ApproximateUtf8TokenCounter(),
+      source: 'fallback',
+      warning: `Could not load inferred tokenizer ${source} for ${options.model.id}: ${reason} Using an explicitly approximate UTF-8 counter; set PPAGENT_TOKENIZER to a local tokenizer directory for offline exact counting.`,
+    };
+  }
   try {
     const tokenizer = await load(source, {
       local_files_only: options.localFilesOnly === true,
@@ -145,63 +153,6 @@ export async function createTokenCounter(
       warning: `Could not load inferred tokenizer ${source} for ${options.model.id}: ${errorMessage(error)}. Using an explicitly approximate UTF-8 counter; set PPAGENT_TOKENIZER to a local tokenizer directory for offline exact counting.`,
     };
   }
-}
-
-/**
- * 只加载 tokenizer.json/config，不引入推理 runtime。source 若是现有目录则离线
- * 读取；否则按 Hugging Face repo id 获取。localFilesOnly 会明确禁止网络回退。
- */
-async function loadHuggingFaceTokenizer(
-  source: string,
-  options: { local_files_only: boolean },
-): Promise<TokenizerLike> {
-  if (await isDirectory(source)) {
-    const [tokenizer, config] = await Promise.all([
-      readJson(join(source, 'tokenizer.json')),
-      readJson(join(source, 'tokenizer_config.json')),
-    ]);
-    return new Tokenizer(tokenizer, config);
-  }
-  if (options.local_files_only) {
-    throw new Error(`Tokenizer directory does not exist: ${source}`);
-  }
-  const root = `https://huggingface.co/${source
-    .split('/')
-    .map(encodeURIComponent)
-    .join('/')}/resolve/main`;
-  const [tokenizer, config] = await Promise.all([
-    fetchJson(`${root}/tokenizer.json`),
-    fetchJson(`${root}/tokenizer_config.json`),
-  ]);
-  return new Tokenizer(tokenizer, config);
-}
-
-async function isDirectory(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-async function readJson(path: string): Promise<Record<string, unknown>> {
-  return parseJson(await readFile(path, 'utf8'), path);
-}
-
-async function fetchJson(url: string): Promise<Record<string, unknown>> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`GET ${url} failed with HTTP ${response.status}`);
-  }
-  return parseJson(await response.text(), url);
-}
-
-function parseJson(text: string, source: string): Record<string, unknown> {
-  const value = JSON.parse(text) as unknown;
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`Tokenizer JSON must be an object: ${source}`);
-  }
-  return value as Record<string, unknown>;
 }
 
 function messageTokenShape(message: Message): unknown {
