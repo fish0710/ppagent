@@ -122,6 +122,100 @@ node bin/agent.js "删除 /tmp/test.txt"
 # 确认框首行显示 rm -f /tmp/test.txt；输入 n 后，拒绝结果会返回给模型继续推理
 ```
 
+#### 完整配置示例（所有可配置项）
+
+下面是一份包含全部字段的示例（可直接存成 `agent.json`）。省略任意字段都会退回内置默认值；
+没有默认值的字段（`model`/`baseUrl`/`apiKey`/`maxOutputTokens`/`effort`/`requestTimeoutMs`/
+`maxRetries`/`contextWindow`/`tokenizer`/`laminarApiKey`）不配就是完全不生效，不是空字符串/0。
+
+```json
+{
+  "provider": {
+    "id": "anthropic",
+    "model": "claude-opus-5",
+    "apiKey": "sk-...",
+    "maxOutputTokens": 25600,
+    "effort": "medium",
+    "requestTimeoutMs": 300000,
+    "maxRetries": 3
+  },
+  "loop": {
+    "maxTurns": 8,
+    "turnTimeoutMs": 120000,
+    "maxLengthContinuations": 2
+  },
+  "context": {
+    "compactThreshold": 0.8,
+    "memPressureThreshold": 0.75,
+    "keepRecentMessages": 6,
+    "contextWindow": 131072,
+    "summaryTargetRatio": 0.4,
+    "tokenizer": "Xenova/gpt-4o",
+    "tokenizerLocalOnly": true,
+    "tokenizerTimeoutMs": 30000
+  },
+  "tools": {
+    "maxResultChars": 8000,
+    "maxConcurrency": 4,
+    "toolTimeoutMs": 30000
+  },
+  "sandbox": {
+    "networkAllowlist": ["localhost:1234", "*:443"]
+  },
+  "resource": {
+    "probeCacheMs": 2000,
+    "minSubagentMemMB": 2048,
+    "maxSubagents": 2,
+    "lowMemoryRetryAfterMs": 5000,
+    "busyGpuRetryAfterMs": 10000
+  },
+  "telemetry": {
+    "laminarApiKey": "lmnr_...",
+    "laminarEndpoint": "https://api.lmnr.ai",
+    "serviceName": "ppagent"
+  }
+}
+```
+
+逐字段对照表（“默认值”一栏留空表示不配就是完全不传，不是某个隐含的空值；“CLI”留空表示该项
+目前只能通过配置文件或环境变量设置）：
+
+| 字段 | 默认值 | 环境变量 | CLI flag | 说明 |
+| --- | --- | --- | --- | --- |
+| `provider.id` | `faux` | `PPAGENT_PROVIDER` | `--provider` | `faux`\|`anthropic`\|`openai`\|`custom`\|`lmstudio`\|`llamacpp` |
+| `provider.model` |  | `PPAGENT_MODEL` | `--model` | |
+| `provider.baseUrl` | lmstudio/llamacpp 有内置默认值；custom 必填 | `PPAGENT_CUSTOM_BASE_URL` |  | 仅 custom/lmstudio/llamacpp 生效 |
+| `provider.apiKey` |  | `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`PPAGENT_CUSTOM_API_KEY`（按 provider 分域） |  | |
+| `provider.maxOutputTokens` |  | `PPAGENT_MAX_OUTPUT_TOKENS` | `--max-output-tokens` | 转发为每次请求的 `StreamOptions.maxTokens` |
+| `provider.effort` |  | `PPAGENT_EFFORT` | `--effort` | `low`\|`medium`\|`high`\|`xhigh`\|`max` |
+| `provider.requestTimeoutMs` |  | `PPAGENT_REQUEST_TIMEOUT_MS` | `--request-timeout-ms` | 单次模型 HTTP 请求超时，转发给 pi-ai/SDK |
+| `provider.maxRetries` |  | `PPAGENT_MAX_RETRIES` | `--max-retries` | 转发给 pi-ai 的客户端重试次数，0 表示关闭 |
+| `loop.maxTurns` | `8` | `PPAGENT_MAX_TURNS` | `--max-turns` | |
+| `loop.turnTimeoutMs` | `120000` | `PPAGENT_TURN_TIMEOUT_MS` |  | 整轮编排超时，含工具执行；见下方两种超时的区分 |
+| `loop.maxLengthContinuations` | `2` | `PPAGENT_MAX_LENGTH_CONTINUATIONS` | `--max-length-continuations` | 模型输出触达 token 上限时自动续写的次数上限 |
+| `context.compactThreshold` | `0.8` | `PPAGENT_COMPACT_THRESHOLD` |  | 触发上下文压缩的占用比例 (0,1] |
+| `context.memPressureThreshold` | `0.75` | `PPAGENT_MEM_PRESSURE_THRESHOLD` |  | 内存压力触发压缩的阈值 (0,1] |
+| `context.keepRecentMessages` | `6` | `PPAGENT_KEEP_RECENT_MESSAGES` |  | 压缩时保留的最近消息数 |
+| `context.contextWindow` | 用模型声明的窗口 | `PPAGENT_MAX_TOKENS` | `--max-tokens` | 覆盖模型自带的上下文窗口大小 |
+| `context.summaryTargetRatio` | `0.4` | `PPAGENT_SUMMARY_TARGET_RATIO` |  | 压缩摘要的目标 token 占比 (0,1] |
+| `context.tokenizer` |  | `PPAGENT_TOKENIZER` |  | 本地 tokenizer 目录或 Hugging Face repo id |
+| `context.tokenizerLocalOnly` | `true` | `PPAGENT_TOKENIZER_LOCAL_ONLY` |  | 关闭后才允许联网下载 tokenizer |
+| `context.tokenizerTimeoutMs` | `30000` | `PPAGENT_TOKENIZER_TIMEOUT_MS` |  | |
+| `tools.maxResultChars` | `8000` | `PPAGENT_MAX_RESULT_CHARS` |  | 工具结果超过此长度即截断 |
+| `tools.maxConcurrency` | `4` | `PPAGENT_MAX_TOOL_CONCURRENCY` |  | 并发执行工具的上限 |
+| `tools.toolTimeoutMs` | `30000` | `PPAGENT_TOOL_TIMEOUT_MS` |  | |
+| `sandbox.networkAllowlist` | `[]` | `PPAGENT_SANDBOX_NETWORK_ALLOWLIST`（逗号分隔） |  | macOS `sandbox-exec` 的出站白名单 |
+| `resource.probeCacheMs` | `2000` | `PPAGENT_RESOURCE_CACHE_MS` |  | 资源探针缓存时长 |
+| `resource.minSubagentMemMB` | `2048` | `PPAGENT_MIN_SUBAGENT_MEM_MB` |  | 低于此可用内存拒绝派生子 agent |
+| `resource.maxSubagents` | `2` | `PPAGENT_MAX_SUBAGENTS` |  | |
+| `resource.lowMemoryRetryAfterMs` | `5000` | `PPAGENT_LOW_MEMORY_RETRY_MS` |  | |
+| `resource.busyGpuRetryAfterMs` | `10000` | `PPAGENT_BUSY_GPU_RETRY_MS` |  | |
+| `telemetry.laminarApiKey` |  | `LMNR_PROJECT_API_KEY` |  | 注意不带 `PPAGENT_` 前缀 |
+| `telemetry.laminarEndpoint` | `https://api.lmnr.ai` | `PPAGENT_LAMINAR_ENDPOINT` |  | |
+| `telemetry.serviceName` | `ppagent` | `PPAGENT_TELEMETRY_SERVICE_NAME` |  | |
+
+`--session`/`--resume`/`--trace`/`--json`/`--tui`/`--permission-mode`/`--config` 是纯 CLI 运行参数，不属于上面这份可持久化的配置 schema，不会被写进 global/project/project.local 里。
+
 **两种超时不要混淆**：`loop.turnTimeoutMs`（默认 120000ms）是 ppagent 自己的整轮编排超时，
 包住模型生成 + 后续工具执行；`provider.requestTimeoutMs` 是转发给 pi-ai/底层 SDK 的单次模型
 HTTP 请求超时（不配置时用 SDK 自己的默认值，通常 10 分钟）。本地跑较慢的模型（比如 lmstudio/
