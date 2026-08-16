@@ -222,6 +222,86 @@ describe('agent config', () => {
     ).toBe(0);
   });
 
+  it('merges requestTimeoutMs/maxRetries across file < env < CLI', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppagent-config-timeout-'));
+    temporaryDirectories.push(directory);
+    const { homeDir, cwd } = await isolatedDirs();
+    const path = join(directory, 'agent.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        provider: { id: 'lmstudio', requestTimeoutMs: 60_000, maxRetries: 5 },
+      }),
+    );
+
+    const fileOnly = await loadAgentConfig({
+      filePath: path,
+      homeDir,
+      cwd,
+      env: {},
+    });
+    expect(fileOnly.provider).toMatchObject({
+      requestTimeoutMs: 60_000,
+      maxRetries: 5,
+    });
+
+    const withEnv = await loadAgentConfig({
+      filePath: path,
+      homeDir,
+      cwd,
+      env: { PPAGENT_REQUEST_TIMEOUT_MS: '300000', PPAGENT_MAX_RETRIES: '0' },
+    });
+    expect(withEnv.provider).toMatchObject({
+      requestTimeoutMs: 300_000,
+      maxRetries: 0,
+    });
+
+    const withCli = await loadAgentConfig({
+      filePath: path,
+      homeDir,
+      cwd,
+      env: { PPAGENT_REQUEST_TIMEOUT_MS: '300000', PPAGENT_MAX_RETRIES: '0' },
+      cli: { provider: { requestTimeoutMs: 600_000, maxRetries: 3 } },
+    });
+    expect(withCli.provider).toMatchObject({
+      requestTimeoutMs: 600_000,
+      maxRetries: 3,
+    });
+  });
+
+  it('validates provider.requestTimeoutMs and provider.maxRetries', () => {
+    expect(() =>
+      mergeAgentConfig({ provider: { id: 'faux', requestTimeoutMs: 0 } }),
+    ).toThrow('provider.requestTimeoutMs must be a positive integer');
+    expect(() =>
+      mergeAgentConfig({ provider: { id: 'faux', maxRetries: -1 } }),
+    ).toThrow('provider.maxRetries must be a non-negative integer');
+    expect(() =>
+      configFromEnvironment({ PPAGENT_REQUEST_TIMEOUT_MS: 'many' }),
+    ).toThrow('PPAGENT_REQUEST_TIMEOUT_MS must be a number');
+    expect(() =>
+      configFromEnvironment({ PPAGENT_MAX_RETRIES: 'many' }),
+    ).toThrow('PPAGENT_MAX_RETRIES must be a number');
+    // maxRetries: 0 must be accepted (disables retries), not treated as falsy/invalid.
+    expect(
+      mergeAgentConfig({ provider: { id: 'faux', maxRetries: 0 } }).provider
+        .maxRetries,
+    ).toBe(0);
+  });
+
+  it('keeps PPAGENT_REQUEST_TIMEOUT_MS independent of the other *_TIMEOUT_MS env vars', () => {
+    const source = configFromEnvironment({
+      PPAGENT_REQUEST_TIMEOUT_MS: '5000',
+      PPAGENT_TURN_TIMEOUT_MS: '90000',
+      PPAGENT_TOOL_TIMEOUT_MS: '10000',
+      PPAGENT_TOKENIZER_TIMEOUT_MS: '20000',
+    });
+    expect(source.provider).toMatchObject({ requestTimeoutMs: 5_000 });
+    expect(source.loop).toMatchObject({ turnTimeoutMs: 90_000 });
+    expect(source.tools).toMatchObject({ toolTimeoutMs: 10_000 });
+    expect(source.context).toMatchObject({ tokenizerTimeoutMs: 20_000 });
+  });
+
   it('reports invalid JSON field types without leaking a TypeError', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppagent-config-invalid-'));
     temporaryDirectories.push(directory);

@@ -114,6 +114,9 @@ class PiAiProvider implements Provider {
         ...(options.effort === undefined
           ? {}
           : { effort: options.effort, reasoningEffort: options.effort }),
+        // timeoutMs/maxRetries 是 pi-ai 自己的字段名，所有 API 模块统一，直接透传。
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
       });
 
       for await (const event of stream) {

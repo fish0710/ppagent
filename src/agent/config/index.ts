@@ -23,6 +23,10 @@ export interface AgentProviderConfig {
   maxOutputTokens?: number;
   /** Anthropic 用 effort，OpenAI 兼容端映射为 reasoningEffort，见 core/llm/pi-ai.ts。 */
   effort?: ModelEffort;
+  /** 单次模型请求的 HTTP 超时（ms），转发给 pi-ai 的 timeoutMs；不是 loop.turnTimeoutMs。 */
+  requestTimeoutMs?: number;
+  /** 转发给 pi-ai 的 maxRetries；0 表示关闭客户端重试。 */
+  maxRetries?: number;
 }
 
 export interface AgentContextConfig extends ContextConfig {
@@ -247,6 +251,9 @@ export function configFromEnvironment(
     // 注意：PPAGENT_MAX_TOKENS 已经被 context.contextWindow 占用，这里必须用不同的名字。
     maxOutputTokens: envNumber(env, 'PPAGENT_MAX_OUTPUT_TOKENS'),
     effort: envEffort(env, 'PPAGENT_EFFORT'),
+    // 单次模型 HTTP 请求超时，跟 loop.turnTimeoutMs（整轮编排超时）分开命名，避免混淆。
+    requestTimeoutMs: envNumber(env, 'PPAGENT_REQUEST_TIMEOUT_MS'),
+    maxRetries: envNumber(env, 'PPAGENT_MAX_RETRIES'),
   });
   const loop = compactObject<Partial<LoopConfig>>({
     maxTurns: envNumber(env, 'PPAGENT_MAX_TURNS'),
@@ -336,6 +343,12 @@ function validateConfig(config: AgentConfig): void {
     !EFFORT_LEVELS.includes(config.provider.effort)
   ) {
     throw new Error(`provider.effort must be one of ${EFFORT_LEVELS.join(', ')}`);
+  }
+  if (config.provider.requestTimeoutMs !== undefined) {
+    positiveInteger(config.provider.requestTimeoutMs, 'provider.requestTimeoutMs');
+  }
+  if (config.provider.maxRetries !== undefined) {
+    nonNegativeInteger(config.provider.maxRetries, 'provider.maxRetries');
   }
   positiveInteger(config.loop.maxTurns, 'loop.maxTurns');
   positiveInteger(config.loop.turnTimeoutMs, 'loop.turnTimeoutMs');

@@ -122,6 +122,14 @@ node bin/agent.js "删除 /tmp/test.txt"
 # 确认框首行显示 rm -f /tmp/test.txt；输入 n 后，拒绝结果会返回给模型继续推理
 ```
 
+**两种超时不要混淆**：`loop.turnTimeoutMs`（默认 120000ms）是 ppagent 自己的整轮编排超时，
+包住模型生成 + 后续工具执行；`provider.requestTimeoutMs` 是转发给 pi-ai/底层 SDK 的单次模型
+HTTP 请求超时（不配置时用 SDK 自己的默认值，通常 10 分钟）。本地跑较慢的模型（比如 lmstudio/
+llamacpp 的大模型）经常先撞到前者——报错是 `Agent turn N timed out after ... ms`，这种情况下
+调大 `PPAGENT_TURN_TIMEOUT_MS`（或配置文件里的 `loop.turnTimeoutMs`），而不是
+`PPAGENT_REQUEST_TIMEOUT_MS`。`provider.maxRetries` 同理转发给 pi-ai 的客户端重试次数（0 表示
+关闭重试），不配置时用 SDK 默认值（通常 2 次）。
+
 配置的文件、环境变量和命令行解析只发生在 `agent/` 装配层；`core/` 不读取这些外部来源。
 特权工具使用真实人工确认策略，非交互环境会明确记录后自动拒绝。macOS 默认使用
 `sandbox-exec`：只允许向工作目录和临时目录写入，系统目录不可写，网络默认禁止。

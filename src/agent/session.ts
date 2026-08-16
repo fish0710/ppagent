@@ -40,6 +40,7 @@ import type {
   ReadonlyContext,
   ResourceProbe,
   Sandbox,
+  StreamOptions,
   TokenCounter,
   ToolContext,
   TraceContext,
@@ -180,6 +181,20 @@ export class DefaultAgentSession implements AgentSession {
 
       const tokenCounter = this.#tokenCounter;
       const config = this.#options.config;
+      const streamOptions: Omit<StreamOptions, 'signal'> = {
+        ...(config.provider.maxOutputTokens === undefined
+          ? {}
+          : { maxTokens: config.provider.maxOutputTokens }),
+        ...(config.provider.effort === undefined
+          ? {}
+          : { effort: config.provider.effort }),
+        ...(config.provider.requestTimeoutMs === undefined
+          ? {}
+          : { timeoutMs: config.provider.requestTimeoutMs }),
+        ...(config.provider.maxRetries === undefined
+          ? {}
+          : { maxRetries: config.provider.maxRetries }),
+      };
       const persistence: AgentLoopPersistence = {
         appendMessages: async (messages) =>
           this.#options.persistence?.appendMessages(messages),
@@ -210,19 +225,7 @@ export class DefaultAgentSession implements AgentSession {
         },
         loopConfig: config.loop,
         maxToolConcurrency: config.tools.maxConcurrency,
-        ...(config.provider.maxOutputTokens === undefined &&
-        config.provider.effort === undefined
-          ? {}
-          : {
-              streamOptions: {
-                ...(config.provider.maxOutputTokens === undefined
-                  ? {}
-                  : { maxTokens: config.provider.maxOutputTokens }),
-                ...(config.provider.effort === undefined
-                  ? {}
-                  : { effort: config.provider.effort }),
-              },
-            }),
+        ...(Object.keys(streamOptions).length === 0 ? {} : { streamOptions }),
         compaction: {
           tokenCounter,
           policy: new ThresholdCompactPolicy({

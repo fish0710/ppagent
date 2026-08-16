@@ -241,6 +241,9 @@ export interface StreamOptions {
   maxTokens?: number;
   temperature?: number;
   effort?: ModelEffort;
+  /** 单次模型请求的 HTTP 超时；转发给 pi-ai/底层 SDK，跟 LoopConfig.turnTimeoutMs（整轮编排超时）是两回事。 */
+  timeoutMs?: number;
+  maxRetries?: number;
 }
 
 export type StreamEvent =

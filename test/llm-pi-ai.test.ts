@@ -164,6 +164,29 @@ describe('pi-ai adapter', () => {
     expect(forwarded).not.toHaveProperty('reasoningEffort');
   });
 
+  it('forwards timeoutMs and maxRetries unchanged (same field names as pi-ai)', async () => {
+    const provider = createPiAiProvider({ providers: ['anthropic'] });
+    await collect(
+      provider,
+      { messages: [] },
+      { timeoutMs: 5_000, maxRetries: 0 },
+    );
+
+    expect(mock.streamOptions.at(-1)).toMatchObject({
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+  });
+
+  it('omits timeoutMs/maxRetries entirely when not requested', async () => {
+    const provider = createPiAiProvider({ providers: ['anthropic'] });
+    await collect(provider, { messages: [] }, { maxTokens: 512 });
+
+    const forwarded = mock.streamOptions.at(-1);
+    expect(forwarded).not.toHaveProperty('timeoutMs');
+    expect(forwarded).not.toHaveProperty('maxRetries');
+  });
+
   it('normalizes start, deltas, tool calls, origin and opaque adapter state', async () => {
     const finalMessage = piMessage([
       { type: 'text', text: 'hello', textSignature: 'text-sig' },
