@@ -97,7 +97,16 @@ JSON 模式和管道输入都使用明确的非交互 `Interaction`。权限确�
 
 ### 验证配置与人工确认
 
-配置按“内置默认值 < JSON 文件 < 环境变量 < CLI flag”合并：
+配置按“内置默认值 < global < project < project.local < 环境变量 < CLI flag”合并，
+其中 global/project/project.local 是三层 JSON 文件，后面的层覆盖前面的层：
+
+| 层级 | 路径 | 说明 |
+| --- | --- | --- |
+| global | `~/.ppagent/agent.json` | 用户级偏好；首次启动如果不存在会自动创建一份默认值快照 |
+| project | `<cwd>/agent.json`（可用 `--config PATH` 覆盖路径） | 项目共享配置，建议提交进仓库 |
+| project.local | `<cwd>/agent.local.json` | 本地个人覆盖，已加入 `.gitignore`，不应提交 |
+
+三层文件都不存在（除 global 会被自动创建外）时直接退回内置默认值。
 
 ```json
 {

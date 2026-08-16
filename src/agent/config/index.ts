@@ -1,4 +1,6 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import type {
   ContextConfig,
   LoopConfig,
@@ -7,6 +9,10 @@ import type {
 } from '../../core/types.js';
 
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+const GLOBAL_CONFIG_DIRNAME = '.ppagent';
+const CONFIG_FILENAME = 'agent.json';
+const PROJECT_LOCAL_CONFIG_FILENAME = 'agent.local.json';
 
 export interface AgentProviderConfig {
   id: string;
@@ -72,9 +78,14 @@ export interface AgentConfigSource {
 }
 
 export interface LoadAgentConfigOptions {
+  /** project 层的路径覆盖；不传则用 `<cwd>/agent.json`。 */
   filePath?: string;
   env?: NodeJS.ProcessEnv;
   cli?: AgentConfigSource;
+  /** 仅供测试/嵌入方注入；默认 process.cwd()。 */
+  cwd?: string;
+  /** 仅供测试/嵌入方注入；默认 os.homedir()。 */
+  homeDir?: string;
 }
 
 const DEFAULT_CONFIG: AgentConfig = {
@@ -108,22 +119,39 @@ const DEFAULT_CONFIG: AgentConfig = {
   },
 };
 
-/** 文件 < 环境变量 < CLI；返回深拷贝后的普通对象。 */
+/** 内置默认值 < global < project < project.local < 环境变量 < CLI；返回深拷贝后的普通对象。 */
 export async function loadAgentConfig(
   options: LoadAgentConfigOptions = {},
 ): Promise<AgentConfig> {
-  const file =
-    options.filePath === undefined
-      ? {}
-      : await readAgentConfigFile(options.filePath);
+  const cwd = options.cwd ?? process.cwd();
+  const globalPath = join(
+    options.homeDir ?? homedir(),
+    GLOBAL_CONFIG_DIRNAME,
+    CONFIG_FILENAME,
+  );
+  const projectPath = options.filePath ?? join(cwd, CONFIG_FILENAME);
+  const projectLocalPath = join(cwd, PROJECT_LOCAL_CONFIG_FILENAME);
+
+  const global = await readOrInitGlobalConfigFile(globalPath);
+  const project = await readOptionalAgentConfigFile(projectPath);
+  const projectLocal = await readOptionalAgentConfigFile(projectLocalPath);
+
   const env = options.env ?? process.env;
   const providerId =
     stringValue(options.cli?.provider?.id) ??
     nonEmpty(env['PPAGENT_PROVIDER']) ??
-    stringValue(file.provider?.id) ??
+    stringValue(projectLocal.provider?.id) ??
+    stringValue(project.provider?.id) ??
+    stringValue(global.provider?.id) ??
     DEFAULT_CONFIG.provider.id;
   const environment = configFromEnvironment(env, providerId);
-  return mergeAgentConfig(file, environment, options.cli ?? {});
+  return mergeAgentConfig(
+    global,
+    project,
+    projectLocal,
+    environment,
+    options.cli ?? {},
+  );
 }
 
 export async function readAgentConfigFile(
@@ -155,6 +183,51 @@ export async function readAgentConfigFile(
   // JSON 不受 TypeScript 约束；先单独校验文件，避免后级 env/CLI 覆盖并掩盖坏值。
   mergeAgentConfig(source);
   return source;
+}
+
+/** project/project.local 用：文件不存在就当空对象，真正的解析/校验错误照常抛出。 */
+async function readOptionalAgentConfigFile(
+  path: string,
+): Promise<AgentConfigSource> {
+  try {
+    return await readAgentConfigFile(path);
+  } catch (error) {
+    if (isEnoent(error)) return {};
+    throw error;
+  }
+}
+
+/** global 用：文件不存在就尽力初始化一份默认快照，写入失败也不影响本次启动。 */
+async function readOrInitGlobalConfigFile(
+  path: string,
+): Promise<AgentConfigSource> {
+  try {
+    return await readAgentConfigFile(path);
+  } catch (error) {
+    if (!isEnoent(error)) throw error;
+    await tryInitGlobalConfig(path);
+    return {};
+  }
+}
+
+async function tryInitGlobalConfig(path: string): Promise<void> {
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`, {
+      flag: 'wx',
+    });
+  } catch {
+    // 只是便利性初始化；只读文件系统、权限问题或并发创建都不应该让 agent 启动失败。
+  }
+}
+
+function isEnoent(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'ENOENT'
+  );
 }
 
 export function configFromEnvironment(

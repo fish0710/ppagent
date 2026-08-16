@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,10 +18,19 @@ afterEach(async () => {
   );
 });
 
+/** 每个测试独立的 homeDir/cwd，避免碰运行测试的机器的真实 ~ 和 cwd。 */
+async function isolatedDirs(): Promise<{ homeDir: string; cwd: string }> {
+  const homeDir = await mkdtemp(join(tmpdir(), 'ppagent-config-home-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'ppagent-config-cwd-'));
+  temporaryDirectories.push(homeDir, cwd);
+  return { homeDir, cwd };
+}
+
 describe('agent config', () => {
   it('merges defaults < file < environment < CLI into a plain object', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppagent-config-'));
     temporaryDirectories.push(directory);
+    const { homeDir, cwd } = await isolatedDirs();
     const path = join(directory, 'agent.json');
     await writeFile(
       path,
@@ -34,6 +43,8 @@ describe('agent config', () => {
 
     const config = await loadAgentConfig({
       filePath: path,
+      homeDir,
+      cwd,
       env: {
         PPAGENT_MODEL: 'env-model',
         PPAGENT_CUSTOM_API_KEY: 'env-secret',
@@ -145,6 +156,7 @@ describe('agent config', () => {
   it('merges maxOutputTokens/effort/maxLengthContinuations across file < env < CLI', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppagent-config-effort-'));
     temporaryDirectories.push(directory);
+    const { homeDir, cwd } = await isolatedDirs();
     const path = join(directory, 'agent.json');
     await writeFile(
       path,
@@ -156,6 +168,8 @@ describe('agent config', () => {
 
     const config = await loadAgentConfig({
       filePath: path,
+      homeDir,
+      cwd,
       env: {
         ANTHROPIC_API_KEY: 'env-secret',
         PPAGENT_MAX_OUTPUT_TOKENS: '2000',
@@ -211,11 +225,113 @@ describe('agent config', () => {
   it('reports invalid JSON field types without leaking a TypeError', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppagent-config-invalid-'));
     temporaryDirectories.push(directory);
+    const { homeDir, cwd } = await isolatedDirs();
     const path = join(directory, 'agent.json');
     await writeFile(path, JSON.stringify({ provider: { id: 42 } }));
 
-    await expect(loadAgentConfig({ filePath: path, env: {} })).rejects.toThrow(
-      'provider.id must not be empty',
+    await expect(
+      loadAgentConfig({ filePath: path, homeDir, cwd, env: {} }),
+    ).rejects.toThrow('provider.id must not be empty');
+  });
+});
+
+describe('three-tier config discovery (global/project/project.local)', () => {
+  it('auto-creates the global config on first run and reuses it thereafter', async () => {
+    const { homeDir, cwd } = await isolatedDirs();
+    const globalPath = join(homeDir, '.ppagent', 'agent.json');
+
+    const config = await loadAgentConfig({ homeDir, cwd, env: {} });
+    expect(config.provider.id).toBe('faux');
+
+    const written = JSON.parse(await readFile(globalPath, 'utf8')) as unknown;
+    expect(written).toMatchObject({ provider: { id: 'faux' } });
+
+    // 第二次加载不应该报错、也不应该改写已经存在的文件。
+    const mtimeBefore = (await stat(globalPath)).mtimeMs;
+    await loadAgentConfig({ homeDir, cwd, env: {} });
+    const mtimeAfter = (await stat(globalPath)).mtimeMs;
+    expect(mtimeAfter).toBe(mtimeBefore);
+  });
+
+  it('does not overwrite an existing global config', async () => {
+    const { homeDir, cwd } = await isolatedDirs();
+    const globalDir = join(homeDir, '.ppagent');
+    const globalPath = join(globalDir, 'agent.json');
+    await mkdir(globalDir, { recursive: true });
+    await writeFile(
+      globalPath,
+      JSON.stringify({ provider: { id: 'anthropic', model: 'custom-global-model' } }),
     );
+
+    const config = await loadAgentConfig({
+      homeDir,
+      cwd,
+      env: { ANTHROPIC_API_KEY: 'k' },
+    });
+
+    expect(config.provider).toMatchObject({
+      id: 'anthropic',
+      model: 'custom-global-model',
+    });
+    const stillThere = JSON.parse(await readFile(globalPath, 'utf8')) as unknown;
+    expect(stillThere).toEqual({
+      provider: { id: 'anthropic', model: 'custom-global-model' },
+    });
+  });
+
+  it('resolves project.local over project over global', async () => {
+    const { homeDir, cwd } = await isolatedDirs();
+    await mkdir(join(homeDir, '.ppagent'), { recursive: true });
+    await writeFile(
+      join(homeDir, '.ppagent', 'agent.json'),
+      JSON.stringify({ loop: { maxTurns: 1 }, provider: { id: 'faux' } }),
+    );
+    await writeFile(
+      join(cwd, 'agent.json'),
+      JSON.stringify({ loop: { maxTurns: 2 } }),
+    );
+    await writeFile(
+      join(cwd, 'agent.local.json'),
+      JSON.stringify({ loop: { maxTurns: 3 } }),
+    );
+
+    const fileOnly = await loadAgentConfig({ homeDir, cwd, env: {} });
+    expect(fileOnly.loop.maxTurns).toBe(3);
+
+    const withEnv = await loadAgentConfig({
+      homeDir,
+      cwd,
+      env: { PPAGENT_MAX_TURNS: '4' },
+    });
+    expect(withEnv.loop.maxTurns).toBe(4);
+
+    const withCli = await loadAgentConfig({
+      homeDir,
+      cwd,
+      env: { PPAGENT_MAX_TURNS: '4' },
+      cli: { loop: { maxTurns: 5 } },
+    });
+    expect(withCli.loop.maxTurns).toBe(5);
+  });
+
+  it('tolerates a missing project and project.local file', async () => {
+    const { homeDir, cwd } = await isolatedDirs();
+    const config = await loadAgentConfig({ homeDir, cwd, env: {} });
+    expect(config.provider.id).toBe('faux');
+    // global 仍然应该被自动创建。
+    const written = JSON.parse(
+      await readFile(join(homeDir, '.ppagent', 'agent.json'), 'utf8'),
+    ) as unknown;
+    expect(written).toMatchObject({ provider: { id: 'faux' } });
+  });
+
+  it('surfaces a genuinely malformed global config instead of silently ignoring it', async () => {
+    const { homeDir, cwd } = await isolatedDirs();
+    await mkdir(join(homeDir, '.ppagent'), { recursive: true });
+    await writeFile(join(homeDir, '.ppagent', 'agent.json'), '{ not valid json');
+
+    await expect(
+      loadAgentConfig({ homeDir, cwd, env: {} }),
+    ).rejects.toThrow('Invalid agent config JSON');
   });
 });
