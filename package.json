@@ -4,6 +4,9 @@
   "description": "为本地部署模型设计的 coding agent harness",
   "private": true,
   "type": "module",
+  "bin": {
+    "pp": "bin/agent.js"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
