@@ -92,6 +92,18 @@ describe('TUI pure reducer and renderer', () => {
     expect(state.phase).toBe('confirming');
   });
 
+  it('makes an in-flight text delta visible before it is committed', () => {
+    const state = reduceTuiState(
+      createInitialTuiState(),
+      { type: 'text_delta', delta: '正在流式输出' },
+      0,
+    );
+    expect(state.pendingText).toBe('正在流式输出');
+    expect(state.transcript).toEqual([]);
+    const frame = renderTuiFrame(state, 80, 0);
+    expect(frame.live).toContain('正在流式输出');
+  });
+
   it('neutralizes terminal control characters from model text', () => {
     const state = reduceTuiState(
       createInitialTuiState(),
@@ -139,6 +151,10 @@ describe('TUI terminal edge', () => {
     now += 500;
     renderer.render({ type: 'text_delta', delta: 'hello' });
     renderer.refresh();
+    // 用未剥离转义序列的原始文本判断：'hello' 应作为连续字面文本出现，
+    // 且第二个 delta 尚未发送，'world' 不应存在。
+    expect(terminal.text()).toContain('hello');
+    expect(terminal.text()).not.toContain('world');
     now += 500;
     renderer.render({ type: 'text_delta', delta: ' world\n' });
     renderer.refresh();
