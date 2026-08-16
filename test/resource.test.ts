@@ -1,11 +1,18 @@
+import * as os from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import { ResourceAdmissionController } from '../src/agent/admission/index.js';
 import {
   MacOsResourceProbe,
   ResourceActivityTracker,
+  SystemResourceProbe,
   parseMemoryPressure,
   parseVmStat,
 } from '../src/core/resource/index.js';
+
+vi.mock('node:os', () => ({
+  freemem: vi.fn(),
+  totalmem: vi.fn(),
+}));
 
 describe('resource probes', () => {
   it('parses memory_pressure and vm_stat recordings', () => {
@@ -69,6 +76,40 @@ describe('resource probes', () => {
     expect(snapshot.memPressure).toBeLessThanOrEqual(1);
     expect(snapshot.memAvailableMB).toBeGreaterThanOrEqual(0);
     expect(snapshot.sampledAt).toBeGreaterThan(0);
+  });
+});
+
+describe('SystemResourceProbe', () => {
+  it('derives memPressure and memAvailableMB from os.freemem/totalmem, live activity counters', async () => {
+    vi.mocked(os.totalmem).mockReturnValue(16 * 1024 * 1024 * 1024);
+    vi.mocked(os.freemem).mockReturnValue(4 * 1024 * 1024 * 1024);
+
+    const activity = new ResourceActivityTracker();
+    const probe = new SystemResourceProbe(activity, () => 1_000);
+
+    expect(await probe.snapshot()).toEqual({
+      source: 'system',
+      memPressure: 0.75,
+      memAvailableMB: 4096,
+      gpuBusy: false,
+      activeSubagents: 0,
+      sampledAt: 1_000,
+    });
+
+    const releaseInference = activity.beginInference();
+    const releaseSubagent = activity.beginSubagent();
+    expect(await probe.snapshot()).toMatchObject({ gpuBusy: true, activeSubagents: 1 });
+    releaseInference();
+    releaseSubagent();
+  });
+
+  it('treats a reported total of zero as full pressure instead of dividing by zero', async () => {
+    vi.mocked(os.totalmem).mockReturnValue(0);
+    vi.mocked(os.freemem).mockReturnValue(0);
+
+    const probe = new SystemResourceProbe(new ResourceActivityTracker(), () => 1_000);
+
+    expect(await probe.snapshot()).toMatchObject({ memPressure: 1, memAvailableMB: 0 });
   });
 });
 
