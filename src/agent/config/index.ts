@@ -94,7 +94,7 @@ export interface LoadAgentConfigOptions {
 
 const DEFAULT_CONFIG: AgentConfig = {
   provider: { id: 'faux' },
-  loop: { maxTurns: 8, turnTimeoutMs: 120_000, maxLengthContinuations: 2 },
+  loop: { maxTurns: 60, turnTimeoutMs: 1_200_000, maxLengthContinuations: 2 },
   context: {
     compactThreshold: 0.8,
     memPressureThreshold: 0.75,

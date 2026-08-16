@@ -64,7 +64,7 @@ describe('agent config', () => {
         baseUrl: 'http://file/v1',
         apiKey: 'env-secret',
       },
-      loop: { maxTurns: 4, turnTimeoutMs: 120_000 },
+      loop: { maxTurns: 4, turnTimeoutMs: 1_200_000 },
       tools: { maxConcurrency: 1 },
       sandbox: { networkAllowlist: ['localhost:1234', '*:443'] },
       context: {
@@ -220,6 +220,13 @@ describe('agent config', () => {
       mergeAgentConfig({ loop: { maxLengthContinuations: 0 } }).loop
         .maxLengthContinuations,
     ).toBe(0);
+  });
+
+  it('defaults maxTurns to 60 and turnTimeoutMs to 1200000ms (600s model + 600s tools)', () => {
+    expect(mergeAgentConfig().loop).toMatchObject({
+      maxTurns: 60,
+      turnTimeoutMs: 1_200_000,
+    });
   });
 
   it('merges requestTimeoutMs/maxRetries across file < env < CLI', async () => {

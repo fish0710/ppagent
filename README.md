@@ -140,8 +140,8 @@ node bin/agent.js "删除 /tmp/test.txt"
     "maxRetries": 3
   },
   "loop": {
-    "maxTurns": 8,
-    "turnTimeoutMs": 120000,
+    "maxTurns": 60,
+    "turnTimeoutMs": 1200000,
     "maxLengthContinuations": 2
   },
   "context": {
@@ -190,8 +190,8 @@ node bin/agent.js "删除 /tmp/test.txt"
 | `provider.effort` |  | `PPAGENT_EFFORT` | `--effort` | `low`\|`medium`\|`high`\|`xhigh`\|`max` |
 | `provider.requestTimeoutMs` |  | `PPAGENT_REQUEST_TIMEOUT_MS` | `--request-timeout-ms` | 单次模型 HTTP 请求超时，转发给 pi-ai/SDK |
 | `provider.maxRetries` |  | `PPAGENT_MAX_RETRIES` | `--max-retries` | 转发给 pi-ai 的客户端重试次数，0 表示关闭 |
-| `loop.maxTurns` | `8` | `PPAGENT_MAX_TURNS` | `--max-turns` | |
-| `loop.turnTimeoutMs` | `120000` | `PPAGENT_TURN_TIMEOUT_MS` |  | 整轮编排超时，含工具执行；见下方两种超时的区分 |
+| `loop.maxTurns` | `60` | `PPAGENT_MAX_TURNS` | `--max-turns` | |
+| `loop.turnTimeoutMs` | `1200000`（20 分钟） | `PPAGENT_TURN_TIMEOUT_MS` | `--turn-timeout-ms` | 整轮编排超时，含工具执行；见下方两种超时的区分 |
 | `loop.maxLengthContinuations` | `2` | `PPAGENT_MAX_LENGTH_CONTINUATIONS` | `--max-length-continuations` | 模型输出触达 token 上限时自动续写的次数上限 |
 | `context.compactThreshold` | `0.8` | `PPAGENT_COMPACT_THRESHOLD` |  | 触发上下文压缩的占用比例 (0,1] |
 | `context.memPressureThreshold` | `0.75` | `PPAGENT_MEM_PRESSURE_THRESHOLD` |  | 内存压力触发压缩的阈值 (0,1] |
@@ -216,13 +216,16 @@ node bin/agent.js "删除 /tmp/test.txt"
 
 `--session`/`--resume`/`--trace`/`--json`/`--tui`/`--permission-mode`/`--config` 是纯 CLI 运行参数，不属于上面这份可持久化的配置 schema，不会被写进 global/project/project.local 里。
 
-**两种超时不要混淆**：`loop.turnTimeoutMs`（默认 120000ms）是 ppagent 自己的整轮编排超时，
+**两种超时不要混淆**：`loop.turnTimeoutMs`（默认 1200000ms，即 20 分钟，覆盖一次模型生成 +
+一次工具执行批次各自的常见耗时量级）是 ppagent 自己的整轮编排超时，
 包住模型生成 + 后续工具执行；`provider.requestTimeoutMs` 是转发给 pi-ai/底层 SDK 的单次模型
 HTTP 请求超时（不配置时用 SDK 自己的默认值，通常 10 分钟）。本地跑较慢的模型（比如 lmstudio/
 llamacpp 的大模型）经常先撞到前者——报错是 `Agent turn N timed out after ... ms`，这种情况下
-调大 `PPAGENT_TURN_TIMEOUT_MS`（或配置文件里的 `loop.turnTimeoutMs`），而不是
-`PPAGENT_REQUEST_TIMEOUT_MS`。`provider.maxRetries` 同理转发给 pi-ai 的客户端重试次数（0 表示
-关闭重试），不配置时用 SDK 默认值（通常 2 次）。
+调大 `--turn-timeout-ms`/`PPAGENT_TURN_TIMEOUT_MS`（或配置文件里的 `loop.turnTimeoutMs`），
+而不是 `--request-timeout-ms`/`PPAGENT_REQUEST_TIMEOUT_MS`——后者只影响单次 HTTP 请求的
+客户端超时，不影响整轮编排预算，对这种"模型确实还在生成、只是比较慢"的场景没有帮助。
+`provider.maxRetries` 同理转发给 pi-ai 的客户端重试次数（0 表示关闭重试），不配置时用 SDK
+默认值（通常 2 次）。
 
 配置的文件、环境变量和命令行解析只发生在 `agent/` 装配层；`core/` 不读取这些外部来源。
 特权工具使用真实人工确认策略，非交互环境会明确记录后自动拒绝。macOS 默认使用

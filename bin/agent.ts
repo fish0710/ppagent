@@ -89,6 +89,7 @@ interface AgentArgs {
   maxOutputTokens?: number;
   effort?: ModelEffort;
   maxLengthContinuations?: number;
+  turnTimeoutMs?: number;
   requestTimeoutMs?: number;
   maxRetries?: number;
   configPath?: string;
@@ -109,8 +110,8 @@ function printHelp(): void {
   agent --version
   agent [--provider faux|anthropic|openai|custom|lmstudio|llamacpp] [--model MODEL] [--max-turns N]
         [--config PATH] [--max-tokens N] [--max-output-tokens N] [--effort low|medium|high|xhigh|max]
-        [--max-length-continuations N] [--request-timeout-ms N] [--max-retries N]
-        [--session ID] [--resume] [--trace]
+        [--max-length-continuations N] [--turn-timeout-ms N] [--request-timeout-ms N]
+        [--max-retries N] [--session ID] [--resume] [--trace]
         [--json | --tui] [--permission-mode interactive|deny|allow] [PROMPT]
   agent --smoke [--provider faux|anthropic|openai|custom|lmstudio|llamacpp] [--model MODEL] [PROMPT]
   agent --check-compat [--provider custom|lmstudio|llamacpp] --model MODEL
@@ -454,6 +455,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
   let maxOutputTokens: number | undefined;
   let effort: ModelEffort | undefined;
   let maxLengthContinuations: number | undefined;
+  let turnTimeoutMs: number | undefined;
   let requestTimeoutMs: number | undefined;
   let maxRetries: number | undefined;
   let configPath: string | undefined;
@@ -491,6 +493,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
       arg === '--max-output-tokens' ||
       arg === '--effort' ||
       arg === '--max-length-continuations' ||
+      arg === '--turn-timeout-ms' ||
       arg === '--request-timeout-ms' ||
       arg === '--max-retries' ||
       arg === '--session' ||
@@ -525,6 +528,8 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
           value,
           '--max-length-continuations',
         );
+      } else if (arg === '--turn-timeout-ms') {
+        turnTimeoutMs = positiveInteger(value, '--turn-timeout-ms');
       } else if (arg === '--request-timeout-ms') {
         requestTimeoutMs = positiveInteger(value, '--request-timeout-ms');
       } else if (arg === '--max-retries') {
@@ -579,6 +584,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
     ...(maxLengthContinuations === undefined
       ? {}
       : { maxLengthContinuations }),
+    ...(turnTimeoutMs === undefined ? {} : { turnTimeoutMs }),
     ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
     ...(maxRetries === undefined ? {} : { maxRetries }),
     ...(configPath === undefined ? {} : { configPath }),
@@ -635,6 +641,9 @@ function cliConfigSource(args: AgentArgs): AgentConfigSource {
     ...(args.maxLengthContinuations === undefined
       ? {}
       : { maxLengthContinuations: args.maxLengthContinuations }),
+    ...(args.turnTimeoutMs === undefined
+      ? {}
+      : { turnTimeoutMs: args.turnTimeoutMs }),
   };
   return {
     ...(Object.keys(provider).length === 0 ? {} : { provider }),
