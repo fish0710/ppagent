@@ -9,6 +9,7 @@ const mock = vi.hoisted(() => ({
   events: [] as unknown[],
   contexts: [] as unknown[],
   customInputs: [] as Array<Record<string, unknown>>,
+  streamOptions: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock('@earendil-works/pi-ai', () => ({
@@ -40,8 +41,13 @@ vi.mock('@earendil-works/pi-ai', () => ({
       getModels: () => [model],
       getModel: (provider: string, id: string) =>
         provider === model.provider && id === model.id ? model : undefined,
-      stream: (_model: unknown, context: unknown) => {
+      stream: (
+        _model: unknown,
+        context: unknown,
+        options: Record<string, unknown> = {},
+      ) => {
         mock.contexts.push(context);
+        mock.streamOptions.push(options);
         return {
           async *[Symbol.asyncIterator]() {
             for (const event of mock.events) yield event;
@@ -81,6 +87,7 @@ describe('pi-ai adapter', () => {
     mock.events = [];
     mock.contexts = [];
     mock.customInputs = [];
+    mock.streamOptions = [];
   });
 
   it('maps model capabilities without exposing pi-ai model objects', () => {
@@ -134,6 +141,27 @@ describe('pi-ai adapter', () => {
         },
       ],
     });
+  });
+
+  it('forwards effort as both effort and reasoningEffort, and maxTokens unchanged', async () => {
+    const provider = createPiAiProvider({ providers: ['anthropic'] });
+    await collect(provider, { messages: [] }, { maxTokens: 512, effort: 'low' });
+
+    expect(mock.streamOptions.at(-1)).toMatchObject({
+      maxTokens: 512,
+      effort: 'low',
+      reasoningEffort: 'low',
+    });
+  });
+
+  it('omits effort/reasoningEffort entirely when no effort is requested', async () => {
+    const provider = createPiAiProvider({ providers: ['anthropic'] });
+    await collect(provider, { messages: [] }, { maxTokens: 512 });
+
+    const forwarded = mock.streamOptions.at(-1);
+    expect(forwarded).toMatchObject({ maxTokens: 512 });
+    expect(forwarded).not.toHaveProperty('effort');
+    expect(forwarded).not.toHaveProperty('reasoningEffort');
   });
 
   it('normalizes start, deltas, tool calls, origin and opaque adapter state', async () => {
@@ -365,9 +393,12 @@ function piMessage(content: unknown[]) {
 async function collect(
   provider = createPiAiProvider({ providers: ['anthropic'] }),
   context: Context = { messages: [] },
+  options?: Parameters<typeof provider.stream>[2],
 ): Promise<StreamEvent[]> {
   const model = provider.listModels()[0]!;
   const events: StreamEvent[] = [];
-  for await (const event of provider.stream(model, context)) events.push(event);
+  for await (const event of provider.stream(model, context, options)) {
+    events.push(event);
+  }
   return events;
 }

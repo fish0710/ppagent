@@ -11,6 +11,7 @@ export type {
   AssistantMessage,
   Context,
   ReadonlyContext,
+  ModelEffort,
   ModelRef,
   Provider,
   StreamEvent,

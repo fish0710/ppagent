@@ -210,6 +210,19 @@ export class DefaultAgentSession implements AgentSession {
         },
         loopConfig: config.loop,
         maxToolConcurrency: config.tools.maxConcurrency,
+        ...(config.provider.maxOutputTokens === undefined &&
+        config.provider.effort === undefined
+          ? {}
+          : {
+              streamOptions: {
+                ...(config.provider.maxOutputTokens === undefined
+                  ? {}
+                  : { maxTokens: config.provider.maxOutputTokens }),
+                ...(config.provider.effort === undefined
+                  ? {}
+                  : { effort: config.provider.effort }),
+              },
+            }),
         compaction: {
           tokenCounter,
           policy: new ThresholdCompactPolicy({

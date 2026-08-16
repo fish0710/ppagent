@@ -8,6 +8,7 @@ import {
 import { O200kTokenCounter } from '../src/core/context/tokenizer.js';
 import {
   FauxProvider,
+  lengthTurn,
   textTurn,
   toolCallTurn,
   toolCallsTurn,
@@ -87,7 +88,7 @@ describe('agent loop', () => {
     const events: UIEvent[] = [];
     const result = await runAgentLoop({
       ...loopOptions(provider, new ToolRegistry([probeTool()]), events),
-      loopConfig: { maxTurns: 1, turnTimeoutMs: 1_000 },
+      loopConfig: { maxTurns: 1, turnTimeoutMs: 1_000, maxLengthContinuations: 2 },
     });
 
     expect(result.reason).toBe('maxTurns');
@@ -96,6 +97,72 @@ describe('agent loop', () => {
       reason: 'maxTurns',
       turns: 1,
     });
+  });
+
+  it('continues automatically after a length-truncated response and finishes normally', async () => {
+    const provider = new FauxProvider({
+      turns: [lengthTurn('partial output'), textTurn('done')],
+    });
+    const events: UIEvent[] = [];
+    const result = await runAgentLoop(
+      loopOptions(provider, new ToolRegistry([probeTool()]), events),
+    );
+
+    expect(result.reason).toBe('stop');
+    expect(result.context.messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'notify',
+        level: 'info',
+        message: expect.stringContaining('continuing automatically'),
+      }),
+    );
+    expect(events.at(-1)).toEqual({ type: 'loop_end', reason: 'stop', turns: 2 });
+  });
+
+  it('fails once maxLengthContinuations is exhausted', async () => {
+    const provider = new FauxProvider({
+      turns: [
+        lengthTurn('first chunk'),
+        lengthTurn('second chunk'),
+        lengthTurn('third chunk'),
+      ],
+    });
+    const events: UIEvent[] = [];
+    const result = await runAgentLoop({
+      ...loopOptions(provider, new ToolRegistry([probeTool()]), events),
+      loopConfig: { maxTurns: 8, turnTimeoutMs: 1_000, maxLengthContinuations: 2 },
+    });
+
+    expect(result.reason).toBe('error');
+    expect(events.at(-1)).toMatchObject({
+      type: 'loop_end',
+      reason: 'error',
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        message: expect.stringContaining('automatic continuation'),
+      }),
+    );
+  });
+
+  it('reports maxTurns instead of error when length hits the turn budget', async () => {
+    const provider = new FauxProvider({
+      turns: [lengthTurn('only chunk')],
+    });
+    const events: UIEvent[] = [];
+    const result = await runAgentLoop({
+      ...loopOptions(provider, new ToolRegistry([probeTool()]), events),
+      loopConfig: { maxTurns: 1, turnTimeoutMs: 1_000, maxLengthContinuations: 2 },
+    });
+
+    expect(result.reason).toBe('maxTurns');
   });
 
   it('emits an explicit aborted termination when the user cancels', async () => {
@@ -510,7 +577,7 @@ function loopOptions(
       sandbox: new PassthroughSandbox(),
     },
     toolOptions: { maxResultChars: 2_000, toolTimeoutMs: 1_000 },
-    loopConfig: { maxTurns: 4, turnTimeoutMs: 1_000 },
+    loopConfig: { maxTurns: 4, turnTimeoutMs: 1_000, maxLengthContinuations: 2 },
     maxToolConcurrency: 2,
     emit: (event) => events.push(event),
   };

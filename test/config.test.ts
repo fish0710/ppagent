@@ -142,6 +142,72 @@ describe('agent config', () => {
     ).toThrow('PPAGENT_MAX_TURNS must be a number');
   });
 
+  it('merges maxOutputTokens/effort/maxLengthContinuations across file < env < CLI', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppagent-config-effort-'));
+    temporaryDirectories.push(directory);
+    const path = join(directory, 'agent.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        provider: { id: 'anthropic', maxOutputTokens: 1_000, effort: 'high' },
+        loop: { maxLengthContinuations: 1 },
+      }),
+    );
+
+    const config = await loadAgentConfig({
+      filePath: path,
+      env: {
+        ANTHROPIC_API_KEY: 'env-secret',
+        PPAGENT_MAX_OUTPUT_TOKENS: '2000',
+        PPAGENT_EFFORT: 'low',
+      },
+      cli: {
+        provider: { effort: 'medium' },
+        loop: { maxLengthContinuations: 3 },
+      },
+    });
+
+    expect(config).toMatchObject({
+      provider: { maxOutputTokens: 2_000, effort: 'medium' },
+      loop: { maxLengthContinuations: 3 },
+    });
+  });
+
+  it('keeps PPAGENT_MAX_TOKENS (contextWindow) and PPAGENT_MAX_OUTPUT_TOKENS independent', () => {
+    const source = configFromEnvironment({
+      PPAGENT_MAX_TOKENS: '50000',
+      PPAGENT_MAX_OUTPUT_TOKENS: '4096',
+    });
+    expect(source.context).toMatchObject({ contextWindow: 50_000 });
+    expect(source.provider).toMatchObject({ maxOutputTokens: 4_096 });
+  });
+
+  it('validates provider.maxOutputTokens, provider.effort, and loop.maxLengthContinuations', () => {
+    expect(() =>
+      mergeAgentConfig({ provider: { id: 'faux', maxOutputTokens: 0 } }),
+    ).toThrow('provider.maxOutputTokens must be a positive integer');
+    expect(() =>
+      mergeAgentConfig({ provider: { id: 'faux', effort: 'extreme' as never } }),
+    ).toThrow('provider.effort must be one of low, medium, high, xhigh, max');
+    expect(() =>
+      mergeAgentConfig({ loop: { maxLengthContinuations: -1 } }),
+    ).toThrow('loop.maxLengthContinuations must be a non-negative integer');
+    expect(() =>
+      configFromEnvironment({ PPAGENT_EFFORT: 'extreme' }),
+    ).toThrow('PPAGENT_EFFORT must be one of low, medium, high, xhigh, max');
+    expect(() =>
+      configFromEnvironment({ PPAGENT_MAX_OUTPUT_TOKENS: 'many' }),
+    ).toThrow('PPAGENT_MAX_OUTPUT_TOKENS must be a number');
+  });
+
+  it('defaults maxLengthContinuations to 2 and allows disabling it with 0', () => {
+    expect(mergeAgentConfig().loop.maxLengthContinuations).toBe(2);
+    expect(
+      mergeAgentConfig({ loop: { maxLengthContinuations: 0 } }).loop
+        .maxLengthContinuations,
+    ).toBe(0);
+  });
+
   it('reports invalid JSON field types without leaking a TypeError', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppagent-config-invalid-'));
     temporaryDirectories.push(directory);

@@ -12,6 +12,7 @@ import {
   toolCallsTurn,
   type Context,
   type FauxTurn,
+  type ModelEffort,
   type ModelRef,
   type Provider,
 } from '../dist/core/llm/index.js';
@@ -85,6 +86,9 @@ interface AgentArgs {
   prompt: string;
   maxTurns?: number;
   maxTokens?: number;
+  maxOutputTokens?: number;
+  effort?: ModelEffort;
+  maxLengthContinuations?: number;
   configPath?: string;
   session?: string;
   resume: boolean;
@@ -102,7 +106,8 @@ function printHelp(): void {
   process.stdout.write(`Usage:
   agent --version
   agent [--provider faux|anthropic|openai|custom|lmstudio|llamacpp] [--model MODEL] [--max-turns N]
-        [--config PATH] [--max-tokens N] [--session ID] [--resume] [--trace]
+        [--config PATH] [--max-tokens N] [--max-output-tokens N] [--effort low|medium|high|xhigh|max]
+        [--max-length-continuations N] [--session ID] [--resume] [--trace]
         [--json | --tui] [--permission-mode interactive|deny|allow] [PROMPT]
   agent --smoke [--provider faux|anthropic|openai|custom|lmstudio|llamacpp] [--model MODEL] [PROMPT]
   agent --check-compat [--provider custom|lmstudio|llamacpp] --model MODEL
@@ -443,6 +448,9 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
   let model: string | undefined;
   let maxTurns: number | undefined;
   let maxTokens: number | undefined;
+  let maxOutputTokens: number | undefined;
+  let effort: ModelEffort | undefined;
+  let maxLengthContinuations: number | undefined;
   let configPath: string | undefined;
   let session: string | undefined;
   let resume = false;
@@ -475,6 +483,9 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
       arg === '--model' ||
       arg === '--max-turns' ||
       arg === '--max-tokens' ||
+      arg === '--max-output-tokens' ||
+      arg === '--effort' ||
+      arg === '--max-length-continuations' ||
       arg === '--session' ||
       arg === '--config' ||
       arg === '--permission-mode'
@@ -489,6 +500,24 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
         maxTurns = positiveInteger(value, '--max-turns');
       } else if (arg === '--max-tokens') {
         maxTokens = positiveInteger(value, '--max-tokens');
+      } else if (arg === '--max-output-tokens') {
+        maxOutputTokens = positiveInteger(value, '--max-output-tokens');
+      } else if (arg === '--effort') {
+        if (
+          value !== 'low' &&
+          value !== 'medium' &&
+          value !== 'high' &&
+          value !== 'xhigh' &&
+          value !== 'max'
+        ) {
+          throw new Error('--effort must be low, medium, high, xhigh, or max');
+        }
+        effort = value;
+      } else if (arg === '--max-length-continuations') {
+        maxLengthContinuations = nonNegativeInteger(
+          value,
+          '--max-length-continuations',
+        );
       } else if (arg === '--config') {
         configPath = value;
       } else if (arg === '--permission-mode') {
@@ -534,6 +563,11 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
     prompt,
     ...(maxTurns === undefined ? {} : { maxTurns }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+    ...(effort === undefined ? {} : { effort }),
+    ...(maxLengthContinuations === undefined
+      ? {}
+      : { maxLengthContinuations }),
     ...(configPath === undefined ? {} : { configPath }),
     ...(session === undefined ? {} : { session }),
     resume,
@@ -573,18 +607,32 @@ function createAgentInteraction(
 function cliConfigSource(args: AgentArgs): AgentConfigSource {
   return {
     ...(
-      args.provider === undefined && args.model === undefined
+      args.provider === undefined &&
+      args.model === undefined &&
+      args.maxOutputTokens === undefined &&
+      args.effort === undefined
         ? {}
         : {
             provider: {
               ...(args.provider === undefined ? {} : { id: args.provider }),
               ...(args.model === undefined ? {} : { model: args.model }),
+              ...(args.maxOutputTokens === undefined
+                ? {}
+                : { maxOutputTokens: args.maxOutputTokens }),
+              ...(args.effort === undefined ? {} : { effort: args.effort }),
             },
           }
     ),
-    ...(args.maxTurns === undefined
+    ...(args.maxTurns === undefined && args.maxLengthContinuations === undefined
       ? {}
-      : { loop: { maxTurns: args.maxTurns } }),
+      : {
+          loop: {
+            ...(args.maxTurns === undefined ? {} : { maxTurns: args.maxTurns }),
+            ...(args.maxLengthContinuations === undefined
+              ? {}
+              : { maxLengthContinuations: args.maxLengthContinuations }),
+          },
+        }),
     ...(args.maxTokens === undefined
       ? {}
       : { context: { contextWindow: args.maxTokens } }),
@@ -802,6 +850,14 @@ function positiveInteger(value: string, option: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1) {
     throw new Error(`${option} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function nonNegativeInteger(value: string, option: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${option} must be a non-negative integer`);
   }
   return parsed;
 }

@@ -186,6 +186,34 @@ export function textTurn(
   return { steps };
 }
 
+export function lengthTurn(
+  text: string,
+  options: {
+    chunkSize?: number;
+    delayMs?: number;
+    now?: () => number;
+    origin?: AssistantMessage['origin'];
+  } = {},
+): FauxTurn {
+  const steps: FauxStep[] = [];
+  for (const chunk of splitText(text, (options.chunkSize ?? text.length) || 1)) {
+    if ((options.delayMs ?? 0) > 0) {
+      steps.push({ type: 'delay', ms: options.delayMs ?? 0 });
+    }
+    steps.push({ type: 'text_delta', delta: chunk });
+  }
+  steps.push({
+    type: 'done',
+    message: assistantMessage(
+      [{ type: 'text', text }],
+      'length',
+      options.now,
+      options.origin,
+    ),
+  });
+  return { steps };
+}
+
 export function toolCallTurn(options: FauxToolCallSpec & {
   now?: () => number;
   origin?: AssistantMessage['origin'];

@@ -233,10 +233,14 @@ export interface ModelCompat {
   supportsParallelToolCalls?: boolean;
 }
 
+/** Anthropic 用 effort，OpenAI 兼容端用 reasoningEffort；adapter 层负责映射到各自字段名。 */
+export type ModelEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface StreamOptions {
   signal?: AbortSignal;
   maxTokens?: number;
   temperature?: number;
+  effort?: ModelEffort;
 }
 
 export type StreamEvent =
@@ -741,6 +745,8 @@ export interface LoopConfig {
   maxTurns: number;
   /** 单轮最长耗时，超时后中断 */
   turnTimeoutMs: number;
+  /** stopReason === 'length' 时自动续写的最大次数；0 表示禁用，立即报错。 */
+  maxLengthContinuations: number;
 }
 
 export interface ContextConfig {

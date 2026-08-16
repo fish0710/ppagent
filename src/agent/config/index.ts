@@ -2,14 +2,21 @@ import { readFile } from 'node:fs/promises';
 import type {
   ContextConfig,
   LoopConfig,
+  ModelEffort,
   ToolsConfig,
 } from '../../core/types.js';
+
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 export interface AgentProviderConfig {
   id: string;
   model?: string;
   baseUrl?: string;
   apiKey?: string;
+  /** 每次请求的输出 token 上限；内置/自定义/本地 provider 一律走 StreamOptions.maxTokens。 */
+  maxOutputTokens?: number;
+  /** Anthropic 用 effort，OpenAI 兼容端映射为 reasoningEffort，见 core/llm/pi-ai.ts。 */
+  effort?: ModelEffort;
 }
 
 export interface AgentContextConfig extends ContextConfig {
@@ -72,7 +79,7 @@ export interface LoadAgentConfigOptions {
 
 const DEFAULT_CONFIG: AgentConfig = {
   provider: { id: 'faux' },
-  loop: { maxTurns: 8, turnTimeoutMs: 120_000 },
+  loop: { maxTurns: 8, turnTimeoutMs: 120_000, maxLengthContinuations: 2 },
   context: {
     compactThreshold: 0.8,
     memPressureThreshold: 0.75,
@@ -164,10 +171,14 @@ export function configFromEnvironment(
         ? nonEmpty(env['PPAGENT_CUSTOM_BASE_URL'])
         : undefined,
     apiKey: providerApiKey(env, providerId),
+    // 注意：PPAGENT_MAX_TOKENS 已经被 context.contextWindow 占用，这里必须用不同的名字。
+    maxOutputTokens: envNumber(env, 'PPAGENT_MAX_OUTPUT_TOKENS'),
+    effort: envEffort(env, 'PPAGENT_EFFORT'),
   });
   const loop = compactObject<Partial<LoopConfig>>({
     maxTurns: envNumber(env, 'PPAGENT_MAX_TURNS'),
     turnTimeoutMs: envNumber(env, 'PPAGENT_TURN_TIMEOUT_MS'),
+    maxLengthContinuations: envNumber(env, 'PPAGENT_MAX_LENGTH_CONTINUATIONS'),
   });
   const context = compactObject<Partial<AgentContextConfig>>({
     contextWindow: envNumber(env, 'PPAGENT_MAX_TOKENS'),
@@ -244,8 +255,18 @@ function validateConfig(config: AgentConfig): void {
   optionalNonEmptyString(config.provider.model, 'provider.model');
   optionalNonEmptyString(config.provider.baseUrl, 'provider.baseUrl');
   optionalNonEmptyString(config.provider.apiKey, 'provider.apiKey');
+  if (config.provider.maxOutputTokens !== undefined) {
+    positiveInteger(config.provider.maxOutputTokens, 'provider.maxOutputTokens');
+  }
+  if (
+    config.provider.effort !== undefined &&
+    !EFFORT_LEVELS.includes(config.provider.effort)
+  ) {
+    throw new Error(`provider.effort must be one of ${EFFORT_LEVELS.join(', ')}`);
+  }
   positiveInteger(config.loop.maxTurns, 'loop.maxTurns');
   positiveInteger(config.loop.turnTimeoutMs, 'loop.turnTimeoutMs');
+  nonNegativeInteger(config.loop.maxLengthContinuations, 'loop.maxLengthContinuations');
   positiveInteger(config.context.keepRecentMessages, 'context.keepRecentMessages');
   positiveInteger(config.tools.maxResultChars, 'tools.maxResultChars');
   positiveInteger(config.tools.maxConcurrency, 'tools.maxConcurrency');
@@ -330,6 +351,18 @@ function envBoolean(
   if (/^(?:1|true|yes|on)$/iu.test(raw)) return true;
   if (/^(?:0|false|no|off)$/iu.test(raw)) return false;
   throw new Error(`${name} must be a boolean`);
+}
+
+function envEffort(
+  env: NodeJS.ProcessEnv,
+  name: string,
+): ModelEffort | undefined {
+  const raw = nonEmpty(env[name]);
+  if (raw === undefined) return undefined;
+  if ((EFFORT_LEVELS as readonly string[]).includes(raw)) {
+    return raw as ModelEffort;
+  }
+  throw new Error(`${name} must be one of ${EFFORT_LEVELS.join(', ')}`);
 }
 
 function compactObject<T extends object>(value: object): T {

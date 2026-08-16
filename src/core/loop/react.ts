@@ -3,6 +3,7 @@ import type {
   ReadonlyContext,
   ModelRef,
   Provider,
+  StreamOptions,
   ToolCallBlock,
   ToolContext,
   ToolResultMessage,
@@ -23,6 +24,8 @@ export interface ReactTurnOptions {
   context: ReadonlyContext;
   signal: AbortSignal;
   emit: (event: UIEvent) => void;
+  /** maxTokens/effort 等每次请求可覆盖的参数；signal 已经是独立字段，这里不重复。 */
+  streamOptions?: Omit<StreamOptions, 'signal'>;
 }
 
 export interface ReactTurnResult {
@@ -68,7 +71,7 @@ export async function runReactTurn(
     for await (const event of options.provider.stream(
       options.model,
       options.context,
-      { signal: options.signal },
+      { signal: options.signal, ...options.streamOptions },
     )) {
       switch (event.type) {
         case 'start':

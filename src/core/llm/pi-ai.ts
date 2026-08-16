@@ -110,6 +110,10 @@ class PiAiProvider implements Provider {
         ...(options.temperature === undefined
           ? {}
           : { temperature: options.temperature }),
+        // Anthropic 用 effort，OpenAI 兼容端用 reasoningEffort；各自的 stream 函数只认自己的字段名。
+        ...(options.effort === undefined
+          ? {}
+          : { effort: options.effort, reasoningEffort: options.effort }),
       });
 
       for await (const event of stream) {

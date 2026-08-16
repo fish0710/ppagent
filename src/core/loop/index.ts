@@ -12,6 +12,7 @@ import type {
   ResourceProbe,
   SpanExporter,
   StopReason,
+  StreamOptions,
   Summarizer,
   TokenCounter,
   ToolContext,
@@ -26,6 +27,9 @@ import type {
 import { ToolRegistry } from '../tools/registry.js';
 import { executeReactTools, runReactTurn } from './react.js';
 
+const CONTINUE_AFTER_LENGTH_PROMPT =
+  'Your previous response was cut off because it reached the output token limit. Continue exactly where you left off. Do not repeat, summarize, or restate anything you already produced.';
+
 export interface AgentLoopOptions {
   provider: Provider;
   model: ModelRef;
@@ -39,6 +43,8 @@ export interface AgentLoopOptions {
   toolOptions: ToolExecutorOptions;
   loopConfig: LoopConfig;
   maxToolConcurrency?: number;
+  /** maxTokens/effort 等每次请求可覆盖的参数，透传给每一次 runReactTurn。 */
+  streamOptions?: Omit<StreamOptions, 'signal'>;
   /** M5 可选装配；不提供时保持 M4 的纯内存追加行为。 */
   compaction?: AgentLoopCompactionOptions;
   /** loop 只搬运变更，不认识具体 Store 实现。 */
@@ -130,6 +136,8 @@ export async function runAgentLoop(
   });
   let completedReason: LoopEndReason | undefined;
   let completedTurns = 0;
+  // 跨整个 run 累计，不随 turn 重置；防止持续超长输出的模型把 maxTurns 全部耗在续写上。
+  let lengthContinuations = 0;
   // 所有正常出口都走 finish，保证每次运行恰好产生一个 loop_end。
   const finish = (reason: LoopEndReason, turns: number): AgentLoopResult => {
     completedReason = reason;
@@ -249,6 +257,9 @@ export async function runAgentLoop(
           context,
           signal: control.signal,
           emit,
+          ...(options.streamOptions === undefined
+            ? {}
+            : { streamOptions: options.streamOptions }),
         });
         modelSpan?.end(
           {
@@ -346,13 +357,31 @@ export async function runAgentLoop(
           return finish('stop', turn);
         case 'aborted':
           return finish('aborted', turn);
-        case 'length':
-          turnFailure = 'Model response reached its output token limit.';
+        case 'length': {
+          if (turn === options.loopConfig.maxTurns) {
+            return finish('maxTurns', turn);
+          }
+          if (lengthContinuations >= options.loopConfig.maxLengthContinuations) {
+            turnFailure = `Model response reached its output token limit after ${lengthContinuations} automatic continuation(s).`;
+            emit({
+              type: 'error',
+              message: turnFailure,
+            });
+            return finish('error', turn);
+          }
+          lengthContinuations += 1;
           emit({
-            type: 'error',
-            message: turnFailure,
+            type: 'notify',
+            level: 'info',
+            message: `Model response hit the output token limit; continuing automatically (${lengthContinuations}/${options.loopConfig.maxLengthContinuations}).`,
           });
-          return finish('error', turn);
+          await appendMessages({
+            role: 'user',
+            content: CONTINUE_AFTER_LENGTH_PROMPT,
+            timestamp: Date.now(),
+          });
+          continue;
+        }
         case 'toolUse':
           turnFailure = 'Model reported toolUse without a complete native tool call.';
           emit({
