@@ -1,6 +1,7 @@
 import type {
   CompactPolicy,
   CompactResult,
+  CompactTrigger,
   Context,
   LoopConfig,
   LoopEndReason,
@@ -66,6 +67,8 @@ export interface AgentLoopCompactionOptions {
   /** 测试/CLI 可收窄窗口；默认使用模型声明的 contextWindow。 */
   contextWindow?: number;
   previousSummary?: Message;
+  /** 紧跟在 previousSummary 之后、原样保留的 user 消息块；见 CompactExecutionContext.previousCarried。 */
+  previousCarried?: readonly Message[];
   targetTokens?: number;
   resource?: ResourceSnapshot;
   /** 每轮压缩决策前按需采样；实现负责缓存昂贵的平台调用。 */
@@ -122,6 +125,9 @@ export async function runAgentLoop(
           ...(options.compaction.previousSummary === undefined
             ? {}
             : { previousSummary: options.compaction.previousSummary }),
+          ...(options.compaction.previousCarried === undefined
+            ? {}
+            : { previousCarried: options.compaction.previousCarried }),
         });
   const context: ReadonlyContext = contextManager?.context ?? initialContext;
   const appendMessages = async (...messages: Message[]): Promise<void> => {
@@ -181,6 +187,7 @@ export async function runAgentLoop(
         const compactTrace = turnTrace.child('compact');
         const compactSpan = spans?.start('context.compact', compactTrace);
         let compacted: CompactResult | null;
+        let compactTrigger: CompactTrigger | null = null;
         let resourceSource: ResourceSnapshot['source'] | undefined;
         try {
           let resource = options.compaction.resource;
@@ -204,42 +211,78 @@ export async function runAgentLoop(
             }
           }
           resourceSource = resource?.source;
-          compacted = await contextManager.compactIfNeeded({
+          const contextWindow =
+            options.compaction.contextWindow ?? options.model.contextWindow;
+          const trigger = contextManager.shouldCompact({
             policy: options.compaction.policy,
-            summarizer: options.compaction.summarizer,
-            contextWindow:
-              options.compaction.contextWindow ?? options.model.contextWindow,
-            signal: control.signal,
-            trace: compactTrace,
-            ...(resource === undefined
-              ? {}
-              : { resource }),
-            ...(options.compaction.targetTokens === undefined
-              ? {}
-              : { targetTokens: options.compaction.targetTokens }),
+            contextWindow,
+            ...(resource === undefined ? {} : { resource }),
           });
+          compactTrigger = trigger;
+          if (trigger === null) {
+            compacted = null;
+          } else {
+            // LLM 摘要可能跑几十秒；先把开始信号发出去，界面才不会静默卡住。
+            emit({ type: 'compact_start', trigger });
+            compacted = await contextManager.compact(trigger, {
+              policy: options.compaction.policy,
+              summarizer: options.compaction.summarizer,
+              contextWindow,
+              signal: control.signal,
+              trace: compactTrace,
+              ...(options.compaction.targetTokens === undefined
+                ? {}
+                : { targetTokens: options.compaction.targetTokens }),
+            });
+          }
           compactSpan?.end(
             compacted === null
               ? { 'context.compacted': false }
               : {
                   'context.compacted': true,
+                  'context.kind': compacted.kind,
                   'context.trigger': compacted.trigger,
                   'context.tokens_before': compacted.tokensBefore,
                   'context.tokens_after': compacted.tokensAfter,
+                  'context.pruned_count': compacted.prunedCount,
+                  ...(compacted.meta === undefined
+                    ? {}
+                    : {
+                        'context.strategy': compacted.meta.strategy,
+                        'context.model_calls': compacted.meta.modelCalls,
+                      }),
                 },
           );
         } catch (error) {
           compactSpan?.end({}, error);
           throw error;
         }
-        if (compacted !== null) {
-          // compaction 记录先落盘，再让模型消费新视图；恢复时不会看到半次压缩。
-          await options.persistence?.appendCompaction(compacted);
+        if (compacted === null) {
+          if (compactTrigger !== null) {
+            // compact_start 已经发过，必须有收尾事件，否则界面停在压缩相位。
+            emit({
+              type: 'compact_skipped',
+              trigger: compactTrigger,
+              reason: '没有可折叠的历史，上下文保持不变',
+            });
+          }
+        } else {
+          // 剪枝是磁盘原文上的确定性纯函数，恢复时重跑即可，不写记录；
+          // 只有摘要改变了"从哪里开始重放"，必须落盘。
+          if (compacted.kind === 'summarize') {
+            // compaction 记录先落盘，再让模型消费新视图；恢复时不会看到半次压缩。
+            await options.persistence?.appendCompaction(compacted);
+          }
           emit({
             type: 'compacted',
             trigger: compacted.trigger,
+            kind: compacted.kind,
             tokensBefore: compacted.tokensBefore,
             tokensAfter: compacted.tokensAfter,
+            prunedCount: compacted.prunedCount,
+            ...(compacted.meta === undefined
+              ? {}
+              : { strategy: compacted.meta.strategy }),
             ...(resourceSource === undefined ? {} : { resourceSource }),
           });
         }
@@ -379,6 +422,8 @@ export async function runAgentLoop(
             role: 'user',
             content: CONTINUE_AFTER_LENGTH_PROMPT,
             timestamp: Date.now(),
+            // harness 注入的续写提示词，不是用户说的话；见 UserMessage.synthetic。
+            synthetic: true,
           });
           continue;
         }

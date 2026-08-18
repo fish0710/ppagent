@@ -80,6 +80,12 @@ export interface UserMessage {
   role: 'user';
   content: string | ContentBlock[];
   timestamp: Millis;
+  /**
+   * harness 自己塞进上下文的 UserMessage（压缩摘要、续写提示词），不是用户
+   * 真正说的话。压缩的"user 消息不折叠"策略只保留用户真实输入，不区分这个
+   * 会让历次摘要和续写提示词被当成"用户的话"无限累积进保留区。
+   */
+  synthetic?: true;
 }
 
 export interface AssistantMessage {
@@ -105,6 +111,14 @@ export interface ToolResultMessage {
   isError: boolean;
   /** 结果被截断时置 true，模型需要知道自己看到的不是全部 */
   truncated?: boolean;
+  /**
+   * 正文被 compact 的剪枝层换成存根时置 true。
+   *
+   * 与 truncated 分开：truncated 表示工具执行时输出就超了 maxResultChars，
+   * pruned 表示这条结果当时是完整的、后来为了腾上下文才被剪掉。剪枝是幂等的，
+   * 这个标记就是幂等的依据。
+   */
+  pruned?: boolean;
   /** 工具执行耗时，用于 trace */
   durationMs?: number;
   timestamp: Millis;
@@ -507,15 +521,61 @@ export interface TokenCounter {
 }
 
 export interface CompactResult {
-  /** 压缩后的完整上下文：[摘要, ...保留的最近消息] */
+  /**
+   * 本次压缩做到了哪一层。
+   *
+   *   'prune'      只跑了规则剪枝：老 toolResult 的正文换成存根，消息条数、
+   *                角色顺序、toolCall/toolResult 配对全部不变，没有摘要。
+   *                剪枝是磁盘原文上的确定性纯函数，恢复时重跑即可，
+   *                因此这种结果不写 compaction 记录。
+   *   'summarize'  剪枝之后仍然超阈值，进一步折叠成
+   *                [摘要, ...保留的 user 消息, ...保留的最近消息]。
+   */
+  kind: 'prune' | 'summarize';
+  /**
+   * 压缩后的完整上下文。kind 为 'summarize' 时是
+   * [摘要, ...保留的 user 消息, ...保留的最近消息]。
+   */
   messages: Message[];
-  summary: Message;
+  /** kind 为 'prune' 时没有摘要。 */
+  summary?: Message;
   trigger: CompactTrigger;
+  /** 被摘要取代的消息条数；kind 为 'prune' 时为 0。 */
   replacedCount: number;
+  /** 正文被剪枝换成存根的 toolResult 条数。 */
+  prunedCount: number;
   tokensBefore: number;
   tokensAfter: number;
-  /** 生成本次摘要的策略元信息，持久化 compaction 记录时原样写入。 */
-  meta: SummarizeMeta;
+  /** 生成本次摘要的策略元信息；kind 为 'prune' 时没有。 */
+  meta?: SummarizeMeta;
+  /**
+   * 本次累积后的文件操作清单，由代码从 toolCall 块提取，不经过模型。
+   * 下一次压缩把它作为 previousDetails 传回，累积由代码保证。
+   */
+  details?: FileOperations;
+  /**
+   * `messages` 里"保留的 user 消息"块，在压缩**前**的视图（传给 compact() 的
+   * messages 参数）里的下标，从旧到新排列。持久层用它换算出 keptUserSeqs 写盘；
+   * ContextManager 用它的长度切出 result.messages 里对应的那一段，作为下一次
+   * 压缩的 previousCarried。kind 为 'prune' 时没有 —— 剪枝不改变 carried 状态。
+   */
+  keptUserIndices?: readonly number[];
+}
+
+/**
+ * agent 动过哪些文件。
+ *
+ * 刻意不问模型：路径在 ToolCallBlock.arguments.path 里是结构化的，让模型转述
+ * 只会引入漏项和错字，而且错了没人发现 —— 本地小模型把 prune.ts 写成"那个剪枝
+ * 模块"是常态，一旦转述失真，后续压缩再也找不回原路径。
+ */
+export interface FileOperations {
+  /** 只读过、没改过的文件。 */
+  readFiles: string[];
+  /** 写过或编辑过的文件。同时读写的算这一类。 */
+  modifiedFiles: string[];
+  /** 因为超出上限被丢弃的条数，摘要里标注出来，避免看起来像"只碰过这些"。 */
+  omittedCount?: number;
 }
 
 export interface CompactPolicy {
@@ -531,8 +591,26 @@ export interface CompactPolicy {
 export interface CompactExecutionContext {
   /** 覆盖式压缩产生的上一版摘要；新摘要必须累积它。 */
   previousSummary?: Message;
+  /** 上一版的文件清单，与本次提取结果合并后继续累积。 */
+  previousDetails?: FileOperations;
+  /**
+   * 紧跟在 previousSummary 之后、原样保留的 user 消息块（上一次压缩折叠掉的
+   * 历史里那些真实用户输入，没有被折叠进摘要散文，而是整条留在上下文里）。
+   *
+   * 必须显式传入而不是让策略从 messages 里自己猜：折叠区之后的 retained 尾巴
+   * 同样常以 user 消息开头（turn 起点对齐的结果），单靠"扫开头连续几条 user"
+   * 会把 retained 的第一条也当成搬运块，导致下次压缩把它误判成已经保留过、
+   * 不再折叠。不传等价于空数组（还没发生过带 user 保留的压缩）。
+   */
+  previousCarried: readonly Message[];
+  /** 保留窗口与剪枝收益判定都按窗口比例折算，策略执行时必须知道窗口大小。 */
+  contextWindow: number;
   systemPrompt?: string;
+  /** 实活上下文的工具定义，原样转交给 summarizer；见 SummarizeRequest.tools。 */
+  tools?: readonly ToolDef[];
   targetTokens?: number;
+  /** `/compact <instructions>` 传来的额外要求。 */
+  instructions?: string;
   signal: AbortSignal;
   trace: TraceContext;
 }
@@ -545,14 +623,13 @@ export interface CompactExecutionContext {
  * 各组件互不认识、可独立单测。需要整个 loop 的策略（如 subagent 摘要）
  * 在 agent/session.ts 里构造后注入，接口在手不会形成循环依赖。
  *
- * 预期实现：
- *   - 'structural'  纯规则裁剪，不调模型。工具输出占历史体积的绝大部分，
- *                   read 只留路径与行数、bash 只留退出码与末尾若干行、
- *                   失败重试链只留成功那次，而 toolCall 的名称与参数全部
- *                   保留（那是 agent 的行动轨迹，最不该丢）。
- *                   零延迟、零 GPU、零幻觉 —— 对本地模型可能优于调模型。
- *   - 'llm'         直接调一次模型
- *   - 'subagent'    交给子 agent，受 AdmissionController 约束
+ * 实现：
+ *   - 'structural'  纯规则裁剪，不调模型。零延迟、零 GPU、零幻觉。
+ *                   现在主要作为 'llm' 的失败兜底 —— 它只会机械截断，
+ *                   保不住语义。历史体积的大头（工具输出）已经由 compact
+ *                   的剪枝层单独处理，见 core/context/prune.ts。
+ *   - 'llm'         调一次模型，见 agent/summarize/llm.ts。
+ *   - 'subagent'    交给子 agent，受 AdmissionController 约束（未实现）
  */
 export interface Summarizer {
   readonly id: string;
@@ -567,14 +644,53 @@ export interface SummarizeRequest {
    * 所概括的全部历史 —— 因为内存视图只保留最近一条摘要及其之后的消息，
    * 旧摘要会被丢弃。违反此约束会静默丢失早期历史，症状是 agent 突然
    * 忘记任务目标，且不报错。
+   *
+   * 但"累积"必须靠重写实现，不能靠拼接。把旧摘要原样嵌进新摘要会让摘要
+   * 逐次递归增长，最终吃光整个预算、把新历史挤成一堆省略标记 —— 压缩
+   * 退化成纯粹的信息销毁。LLM 策略的做法是让模型看到旧摘要并明确要求
+   * "改写它、不要嵌套引用"，长度由生成上限硬约束。
    */
   previousSummary?: Message;
+  /**
+   * 紧跟在 previousSummary 之后、原样保留的 user 消息块 —— 上一次压缩折叠掉
+   * 的历史里那些真实用户输入，没有被折叠进摘要散文。
+   *
+   * 规则策略忽略即可。LLM 策略必须把它连同 messages/retained 一起送进请求 ——
+   * 因为 `[previousSummary?, ...carried, ...messages, ...retained]` 逐字节
+   * 等于实活的 context.messages，只有这样拼出来的请求前缀才和上一次真实请求
+   * 一致，才能命中本地推理服务的 KV 前缀缓存。
+   */
+  carried?: readonly Message[];
   /** 本次要折叠的消息 */
   messages: Message[];
+  /**
+   * 切点之后原样保留、不参与折叠的消息。
+   *
+   * 规则策略忽略即可。LLM 策略必须把它连同 carried/messages 一起送进请求 ——
+   * 因为 `[previousSummary?, ...carried, ...messages, ...retained]` 逐字节
+   * 等于实活的 context.messages，只有这样拼出来的请求前缀才和上一次真实请求
+   * 一致，才能命中本地推理服务的 KV 前缀缓存。少一条、多一条、换个顺序都不行。
+   */
+  retained?: readonly Message[];
   /** 任务背景，部分策略需要 */
   systemPrompt?: string;
-  /** 期望的压缩后 token 量 */
+  /**
+   * 实活上下文的工具定义。
+   *
+   * 同样是为了前缀缓存：chat template 把 tools 渲染进 system 段，少传一份
+   * tools，prompt 从第 0 个 token 起就变了，整段 KV 缓存作废。代价是模型
+   * 可能吐工具调用而不是摘要，LLM 策略必须在运行时丢弃 toolcall 事件。
+   */
+  tools?: readonly ToolDef[];
+  /**
+   * 已由代码算好的文件清单，策略应原样拼进摘要，**不得**转交模型改写。
+   * 这是"凡是结构里有的就不问模型"这条原则的落点之一。
+   */
+  fileOps?: FileOperations;
+  /** 摘要消息（含策略自己加的包装）的 token 上限 */
   targetTokens?: number;
+  /** `/compact <instructions>` 传来的额外要求，聚焦本次摘要的重点。 */
+  instructions?: string;
   signal: AbortSignal;
   trace: TraceContext;
 }
@@ -611,9 +727,18 @@ export interface SummarizeMeta {
 //   context 内存  实际发给模型的视图
 //
 // replay 有两种投影：
-//   'compacted'  最后一条 compaction 的 summary + 其后的 message（默认，
-//                也是 --resume 该用的；用全量恢复会立刻爆上下文）
+//   'compacted'  最后一条 compaction 的 summary，加上所有
+//                seq ∈ keptUserSeqs 或 seq >= firstKeptSeq 的 message，按 seq
+//                排序（默认，也是 --resume 该用的；用全量恢复会立刻爆上下文）。
+//                keptUserSeqs 全部小于 firstKeptSeq（它们来自被摘要取代的
+//                那段历史，只是没有被折叠），排序后天然排在 firstKeptSeq 之后
+//                的原文之前，不需要额外的归并逻辑。
 //   'full'       忽略 compaction，返回全部 message（调试回溯用）
+//
+// 'compacted' 投影只允许比压缩后的内存视图更完整，不允许更少：少了症状很
+// 隐蔽——保持会话正常，一 --resume 就丢掉最近几轮或保留的 user 消息，且不
+// 报错；"更多"（比如剪枝结果不落盘，投影里看到未剪枝的原文）是良性的，因为
+// 那部分差异永远是确定性纯函数、能从磁盘原文重新推导出来的。
 // ============================================================================
 
 export type StoreRecord =
@@ -622,18 +747,37 @@ export type StoreRecord =
       kind: 'compaction';
       seq: number;
       /**
-       * 摘要消息。语义是覆盖式的：它涵盖本记录之前的全部历史。
-       * 因此 replay 只需找到最后一条 compaction，取其 summary
-       * 加上其后的 message 记录即可，无需处理区间。
+       * 摘要消息。语义是覆盖式的：它涵盖 firstKeptSeq 之前的全部历史。
        */
       summary: Message;
       trigger: CompactTrigger;
+      /**
+       * 切点消息的 seq —— 摘要覆盖到此为止，这条及其之后的原文都要保留。
+       *
+       * 不能省掉它、直接取"本记录之后的 message"：compaction 记录是在保留
+       * 消息都已经写盘之后才追加的，那批保留消息的 seq 比本记录小。按记录
+       * 位置切会把它们全部丢掉，导致 --resume 出来的上下文比保持会话时少了
+       * 最近几轮原文，而且不报错。
+       */
+      firstKeptSeq: number;
+      /**
+       * 压缩折叠掉的历史里、原样保留的 user 消息的 seq，从旧到新排列。
+       *
+       * 这批 seq 都小于 firstKeptSeq（它们来自被摘要取代的那段历史，只是
+       * 没有被折叠），所以 replay 时按 seq 排序天然把它们排在 firstKeptSeq
+       * 之前的原文之前——不需要额外的归并逻辑。老记录没有这个字段（这个
+       * 功能上线之前写的），replay 按空数组处理，行为等同于没有保留过 user
+       * 消息，不会因为字段缺失而出错或丢消息。
+       */
+      keptUserSeqs?: number[];
       /** 观测压缩收益用 */
       replacedCount: number;
       tokensBefore: number;
       tokensAfter: number;
       /** 摘要策略的自报元信息，横向评估时用 */
       meta: SummarizeMeta;
+      /** 累积到此刻的文件清单；恢复会话后仍能继续累积。老记录缺失时当空处理。 */
+      details?: FileOperations;
       timestamp: Millis;
     };
 
@@ -721,11 +865,27 @@ export type UIEvent =
   /** Interaction 的人类可读通知；JSON CLI 也必须能在单一事件流中还原。 */
   | { type: 'notify'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'admission_denied'; reason: string; retryAfterMs: number | null }
+  /**
+   * 压缩开始。LLM 摘要在本地机器上可能跑几十秒（全量 prefill + 摘要 decode），
+   * 没有这个事件界面就会停在上一个 phase 上一动不动。
+   */
+  | { type: 'compact_start'; trigger: CompactTrigger }
+  /**
+   * 触发了但没压成：安全边界之前没有可折叠的历史，或者压缩后反而更大。
+   * 必须发 —— 否则 compact_start 之后没有收尾事件，界面会一直停在压缩相位。
+   */
+  | { type: 'compact_skipped'; trigger: CompactTrigger; reason: string }
   | {
       type: 'compacted';
       trigger: CompactTrigger;
+      /** 'prune' 表示只剪了工具输出正文，没有生成摘要。 */
+      kind: 'prune' | 'summarize';
       tokensBefore: number;
       tokensAfter: number;
+      /** 正文被换成存根的 toolResult 条数。 */
+      prunedCount: number;
+      /** 摘要策略 id；kind 为 'prune' 时没有。 */
+      strategy?: string;
       /** 内存参与决策时标明采样器，避免不同量纲的探针被混为一谈。 */
       resourceSource?: ResourceSnapshot['source'];
     }
@@ -758,15 +918,50 @@ export interface ContextConfig {
   /** 内存压力触发 compact 的阈值，0–1。M10 前不生效。 */
   memPressureThreshold: number;
   /**
-   * 压缩时保留最近 N 条消息不动。
+   * 压缩时保留最近多少 token 的原文，按 contextWindow 的比例给出，0–1。
    *
-   * 注意这只是起点，不是切点：边界不得切断 toolCall 与其 toolResult 的
-   * 配对。compact 在调模型前触发，此刻末尾常常正是 toolResult，若从中间
-   * 切开，压缩后的上下文里会出现没有前置 toolCall 的孤儿 toolResult ——
-   * OpenAI 兼容服务对此从 400 到静默乱答都有，本地模型尤其容易崩。
-   * 实现须从 N 处向前找到最近的安全切点。
+   * 用 token 预算而不是消息条数：6 条消息可能是 300 token 的闲聊，也可能是
+   * 40k token 的文件读取，条数控不住压缩后的实际体积，压缩频率也会随任务
+   * 类型剧烈波动。
+   *
+   * 这个预算只给出候选切点，不是最终切点：边界不得切断 toolCall 与其
+   * toolResult 的配对。compact 在调模型前触发，此刻末尾常常正是 toolResult，
+   * 若从中间切开，压缩后的上下文里会出现没有前置 toolCall 的孤儿 toolResult
+   * —— OpenAI 兼容服务对此从 400 到静默乱答都有，本地模型尤其容易崩。
+   * 实现须从候选处向前找到最近的安全切点。
    */
-  keepRecentMessages: number;
+  keepRecentRatio: number;
+  /** 摘要消息的 token 上限，同时作为摘要调用的 maxTokens。 */
+  summaryMaxTokens: number;
+  /**
+   * 最近这个比例的 token 内，工具输出正文免于剪枝，0–1。
+   *
+   * 独立于 keepRecentRatio 且通常更小：剪枝要够得着摘要保留区里的老工具输出，
+   * 才能作为摘要的替代方案成立。见 context/prune.ts。
+   */
+  pruneProtectRatio: number;
+  /**
+   * 剪枝回收量低于此值就不剪。
+   *
+   * 剪枝改的是历史中段，一样会作废本地推理服务的 KV 前缀缓存。为几百 token
+   * 的收益付一次全量 prefill 是亏的，宁可等到值得剪的时候一次剪掉。
+   */
+  pruneMinTokens: number;
+  /**
+   * 文件清单的条数上限。超出时先砍 read、保留最近的 —— 改过的文件比读过的
+   * 重要得多。被丢弃的条数会在摘要里标注，避免看起来像"只碰过这些"。
+   */
+  maxTrackedFiles: number;
+  /**
+   * 折叠区里保留的真实 user 消息占 contextWindow 的比例，0–1。
+   *
+   * 用户的原始要求/约束是"结构里已经有的"信息，让模型转述只会引入漏项和
+   * 错字；这个预算给它们一条不经过模型就能跨压缩存活的路径 —— 超预算时从
+   * 最老的开始淘汰（它已经在最多轮压缩里被模型看过，该经历的都经历过了）。
+   * 只保留角色为 user 且非 synthetic 的消息；harness 自己塞的摘要/续写提示词
+   * 不算，见 UserMessage.synthetic。
+   */
+  keepUserRatio: number;
 }
 
 export interface ToolsConfig {

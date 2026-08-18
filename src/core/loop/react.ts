@@ -351,25 +351,39 @@ function diagnoseTextToolCall(
     .map((block) => (block.type === 'text' ? block.text : ''))
     .join('')
     .trim();
-  if (/<\/?tool_call\b/iu.test(text)) return TEXT_TOOL_CALL_DIAGNOSTIC;
+  const names = new Set(context.tools.map((tool) => tool.name));
+  return looksLikeTextToolCall(text, names) ? TEXT_TOOL_CALL_DIAGNOSTIC : undefined;
+}
+
+/**
+ * 判断一段文本是不是"看起来像文本化工具调用"：要么套着 `<tool_call>` 标签，
+ * 要么整个正文就是一个 `{ name, arguments }` 形状的 JSON 且 name 命中已知工具。
+ *
+ * 导出给 agent/summarize/llm.ts 复用同一份判据 —— 摘要请求里模型同样能看见
+ * 完整的 tools 定义，同样可能把工具调用当纯文本吐出来；那边原本只检查"文本
+ * 是否为空"，漏掉了"文本非空但其实是伪装成散文的工具调用"这种情况。
+ */
+export function looksLikeTextToolCall(
+  text: string,
+  toolNames: ReadonlySet<string>,
+): boolean {
+  const trimmed = text.trim();
+  if (/<\/?tool_call\b/iu.test(trimmed)) return true;
 
   // 只解析整个正文是 JSON 的情况；从自然语言里搜 JSON 子串会产生大量误报。
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text) as unknown;
+    parsed = JSON.parse(trimmed) as unknown;
   } catch {
-    return undefined;
+    return false;
   }
-  if (!isRecord(parsed)) return undefined;
-  const names = new Set(context.tools.map((tool) => tool.name));
+  if (!isRecord(parsed)) return false;
   // 工具名必须属于本轮实际下发的定义，并且显式带 arguments 字段。
   return (
     typeof parsed['name'] === 'string' &&
-    names.has(parsed['name']) &&
+    toolNames.has(parsed['name']) &&
     Object.hasOwn(parsed, 'arguments')
-  )
-    ? TEXT_TOOL_CALL_DIAGNOSTIC
-    : undefined;
+  );
 }
 
 function protocolError(

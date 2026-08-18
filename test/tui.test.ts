@@ -51,7 +51,7 @@ describe('TUI pure reducer and renderer', () => {
       '⊘ bash rm -f /tmp/test.txt 10ms — User denied tool execution.',
     );
     expect(state.transcript).toContain(
-      '⟳ 压缩 6.2k→1.1k（内存压力 · memory_pressure）',
+      '⟳ 压缩 6.2k→1.1k（内存压力 · llm · memory_pressure）',
     );
     expect(state.transcript).toContain(
       '⊘ 子 agent 被拒：GPU busy，建议 10s 后重试',
@@ -60,6 +60,54 @@ describe('TUI pure reducer and renderer', () => {
       .toBe(true);
     expect(frames.some((frame) => frame.live.includes('? 允许执行？按 y 允许，n 拒绝')))
       .toBe(true);
+  });
+
+  it('keeps a live indicator while compaction runs', () => {
+    // LLM 摘要在本地机器上可能跑几十秒；没有独立相位界面看起来就是卡死的。
+    let state = reduceTuiState(
+      createInitialTuiState(),
+      { type: 'turn_start', turn: 1, contextTokens: 6200, contextWindow: 8000 },
+      0,
+    );
+    state = reduceTuiState(state, { type: 'compact_start', trigger: 'token' }, 1_000);
+
+    expect(state.phase).toBe('compacting');
+    expect(renderTuiFrame(state, 80, 9_000).live[0]).toContain('压缩上下文');
+    expect(renderTuiFrame(state, 80, 9_000).live[0]).toContain('已 8s');
+
+    state = reduceTuiState(
+      state,
+      {
+        type: 'compacted',
+        trigger: 'token',
+        kind: 'summarize',
+        tokensBefore: 6200,
+        tokensAfter: 1100,
+        prunedCount: 0,
+        strategy: 'llm',
+      },
+      10_000,
+    );
+    // 压缩发生在模型调用之前，结束后下一步就是真正的请求。
+    expect(state.phase).toBe('prefill');
+    expect(state.contextTokens).toBe(1100);
+  });
+
+  it('labels pruning differently from summarization', () => {
+    // 两者的信息损失不是一个量级：剪枝只降了老工具输出的保真度。
+    const state = reduceTuiState(
+      createInitialTuiState(),
+      {
+        type: 'compacted',
+        trigger: 'token',
+        kind: 'prune',
+        tokensBefore: 6200,
+        tokensAfter: 4100,
+        prunedCount: 7,
+      },
+      0,
+    );
+    expect(state.transcript).toContain('⟳ 剪枝 6.2k→4.1k（上下文阈值 · 7 条工具输出）');
   });
 
   it('shows long silent prefill and exact context size', () => {

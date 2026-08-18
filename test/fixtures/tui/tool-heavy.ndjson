@@ -9,7 +9,8 @@
 {"type":"permission_resolved","decision":"deny"}
 {"type":"tool_end","id":"bash-1","name":"bash","isError":true,"preview":"User denied tool execution.","durationMs":10}
 {"type":"turn_start","turn":2,"contextTokens":6200,"contextWindow":8000}
-{"type":"compacted","trigger":"memory","tokensBefore":6200,"tokensAfter":1100,"resourceSource":"memory_pressure"}
+{"type":"compact_start","trigger":"memory"}
+{"type":"compacted","trigger":"memory","kind":"summarize","tokensBefore":6200,"tokensAfter":1100,"prunedCount":0,"strategy":"llm","resourceSource":"memory_pressure"}
 {"type":"admission_denied","reason":"GPU busy","retryAfterMs":10000}
 {"type":"text_delta","delta":"我会改用串行策略"}
 {"type":"text_delta","delta":"继续。"}

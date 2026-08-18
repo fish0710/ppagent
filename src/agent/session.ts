@@ -7,6 +7,8 @@ import {
 } from './tools/spawn-subagent.js';
 import { StructuralSummarizer } from '../core/context/compact.js';
 import { ThresholdCompactPolicy } from '../core/context/compact.js';
+import { LlmSummarizer } from './summarize/llm.js';
+import { ContextManager } from '../core/context/manager.js';
 import { O200kTokenCounter } from '../core/context/tokenizer.js';
 import type {
   AgentLoopPersistence,
@@ -31,6 +33,7 @@ import {
 } from '../core/tools/builtin/index.js';
 import type {
   AdmissionController,
+  CompactResult,
   Context,
   Interaction,
   Message,
@@ -41,6 +44,7 @@ import type {
   ResourceProbe,
   Sandbox,
   StreamOptions,
+  Summarizer,
   TokenCounter,
   ToolContext,
   TraceContext,
@@ -50,6 +54,8 @@ import { ToolRegistry } from '../core/tools/registry.js';
 
 export interface AgentSession {
   prompt(text: string): Promise<AgentLoopResult>;
+  /** 手动压缩上下文；instructions 会附加到摘要指令之后，聚焦本次摘要重点。 */
+  compact(instructions?: string): Promise<CompactResult | null>;
   abort(reason?: unknown): void;
   subscribe(handler: (event: UIEvent) => void): () => void;
   setInteraction(interaction: Interaction): void;
@@ -64,6 +70,8 @@ export interface AgentSessionOptions {
   interaction: Interaction;
   context?: Context;
   previousSummary?: Message;
+  /** 紧跟在 previousSummary 之后、原样保留的 user 消息块；--resume 恢复时用。 */
+  previousCarried?: readonly Message[];
   persistence?: AgentLoopPersistence;
   telemetry?: AgentLoopTelemetryOptions;
   registry?: ToolRegistry;
@@ -99,6 +107,7 @@ export class DefaultAgentSession implements AgentSession {
   readonly #tokenCounter: TokenCounter;
   #context: Context;
   #previousSummary: Message | undefined;
+  #previousCarried: readonly Message[] = [];
   #interaction: Interaction;
   #controller: AbortController | undefined;
 
@@ -109,6 +118,10 @@ export class DefaultAgentSession implements AgentSession {
       options.previousSummary === undefined
         ? undefined
         : structuredClone(options.previousSummary);
+    this.#previousCarried =
+      options.previousCarried === undefined
+        ? []
+        : (structuredClone(options.previousCarried) as Message[]);
     this.#interaction = options.interaction;
     this.#resourceActivity = options.resourceActivity ?? new ResourceActivityTracker();
     this.#resourceProbe =
@@ -163,6 +176,72 @@ export class DefaultAgentSession implements AgentSession {
     return this.#context;
   }
 
+  /**
+   * 手动压缩。自动压缩在每轮模型调用前触发，这里给用户一个提前动手的入口 ——
+   * 知道接下来要干一件大活时先腾地方，比撞到阈值时被动压缩更可控。
+   *
+   * 返回 null 表示没做：历史太短没有可折叠的部分，或者压缩后反而更大。
+   */
+  async compact(instructions?: string): Promise<CompactResult | null> {
+    if (this.#controller !== undefined) {
+      throw new Error('AgentSession already has a prompt in progress');
+    }
+    const controller = new AbortController();
+    this.#controller = controller;
+    try {
+      const config = this.#options.config;
+      const contextWindow =
+        config.context.contextWindow ?? this.#options.model.contextWindow;
+      const manager = new ContextManager({
+        context: this.#context,
+        tokenCounter: this.#tokenCounter,
+        ...(this.#previousSummary === undefined
+          ? {}
+          : { previousSummary: this.#previousSummary }),
+        previousCarried: this.#previousCarried,
+      });
+      this.#emit({ type: 'compact_start', trigger: 'manual' });
+      const result = await manager.compact('manual', {
+        policy: new ThresholdCompactPolicy({
+          config: config.context,
+          tokenCounter: this.#tokenCounter,
+        }),
+        summarizer: this.#createSummarizer(),
+        contextWindow,
+        targetTokens: config.context.summaryMaxTokens,
+        ...(instructions === undefined ? {} : { instructions }),
+        signal: controller.signal,
+        trace: this.#traceFactory(),
+      });
+      if (result === null) {
+        // compact_start 已经发过，必须有收尾事件，否则界面停在压缩相位。
+        this.#emit({
+          type: 'compact_skipped',
+          trigger: 'manual',
+          reason: '没有可折叠的历史，上下文保持不变',
+        });
+        return null;
+      }
+      this.#context = manager.snapshot();
+      if (result.kind === 'summarize' && result.summary !== undefined) {
+        this.#applyCompactionResult(result);
+        await this.#options.persistence?.appendCompaction(result);
+      }
+      this.#emit({
+        type: 'compacted',
+        trigger: result.trigger,
+        kind: result.kind,
+        tokensBefore: result.tokensBefore,
+        tokensAfter: result.tokensAfter,
+        prunedCount: result.prunedCount,
+        ...(result.meta === undefined ? {} : { strategy: result.meta.strategy }),
+      });
+      return result;
+    } finally {
+      if (this.#controller === controller) this.#controller = undefined;
+    }
+  }
+
   async prompt(text: string): Promise<AgentLoopResult> {
     if (text.trim().length === 0) throw new Error('Prompt must not be empty');
     if (this.#controller !== undefined) {
@@ -181,6 +260,8 @@ export class DefaultAgentSession implements AgentSession {
 
       const tokenCounter = this.#tokenCounter;
       const config = this.#options.config;
+      const contextWindow =
+        config.context.contextWindow ?? this.#options.model.contextWindow;
       const streamOptions: Omit<StreamOptions, 'signal'> = {
         ...(config.provider.maxOutputTokens === undefined
           ? {}
@@ -199,7 +280,7 @@ export class DefaultAgentSession implements AgentSession {
         appendMessages: async (messages) =>
           this.#options.persistence?.appendMessages(messages),
         appendCompaction: async (result) => {
-          this.#previousSummary = structuredClone(result.summary);
+          this.#applyCompactionResult(result);
           await this.#options.persistence?.appendCompaction(result);
         },
       };
@@ -232,19 +313,13 @@ export class DefaultAgentSession implements AgentSession {
             config: config.context,
             tokenCounter,
           }),
-          summarizer: new StructuralSummarizer({ tokenCounter }),
-          contextWindow:
-            config.context.contextWindow ?? this.#options.model.contextWindow,
-          targetTokens: Math.max(
-            1,
-            Math.floor(
-              (config.context.contextWindow ?? this.#options.model.contextWindow) *
-                config.context.summaryTargetRatio,
-            ),
-          ),
+          summarizer: this.#createSummarizer(),
+          contextWindow,
+          targetTokens: config.context.summaryMaxTokens,
           ...(this.#previousSummary === undefined
             ? {}
             : { previousSummary: this.#previousSummary }),
+          previousCarried: this.#previousCarried,
           resourceProbe: this.#resourceProbe,
         },
         persistence,
@@ -274,6 +349,45 @@ export class DefaultAgentSession implements AgentSession {
 
   setInteraction(interaction: Interaction): void {
     this.#interaction = interaction;
+  }
+
+  /**
+   * summarize 结果落地后同步更新 previousSummary/previousCarried —— 下一次
+   * 压缩（无论是自动触发还是手动 /compact）都要从这里接着累积。
+   */
+  #applyCompactionResult(result: CompactResult): void {
+    if (result.kind !== 'summarize' || result.summary === undefined) return;
+    this.#previousSummary = structuredClone(result.summary);
+    if (result.keptUserIndices !== undefined) {
+      // result.messages = [summary, ...carried, ...retained]；carried 的长度
+      // 就是 keptUserIndices 的长度，直接切片即可，不需要重新按角色扫描——
+      // 那样会把 retained 开头凑巧是 user 的消息也当成 carried 的一部分。
+      this.#previousCarried = result.messages.slice(1, 1 + result.keptUserIndices.length);
+    }
+  }
+
+  /**
+   * 规则摘要器永远存在，LLM 摘要器包在它外面。
+   *
+   * 只能在这里构造：LlmSummarizer 需要 Provider，而 core/context 不许认识
+   * core/llm（depcruise core-no-upward），需要模型的策略只能由装配层注入。
+   */
+  #createSummarizer(): Summarizer {
+    const config = this.#options.config;
+    const structural = new StructuralSummarizer({
+      tokenCounter: this.#tokenCounter,
+    });
+    if (!config.context.llmSummarizer) return structural;
+    return new LlmSummarizer({
+      provider: this.#provider,
+      model: this.#options.model,
+      tokenCounter: this.#tokenCounter,
+      fallback: structural,
+      maxTokens: config.context.summaryMaxTokens,
+      timeoutMs: config.context.summarizeTimeoutMs,
+      notify: (message) => this.#emit({ type: 'notify', level: 'warn', message }),
+      now: this.#now,
+    });
   }
 
   #emit(event: UIEvent): void {

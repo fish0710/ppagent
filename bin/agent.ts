@@ -19,6 +19,7 @@ import {
 } from '../dist/core/llm/index.js';
 import type { AgentLoopPersistence } from '../dist/core/loop/index.js';
 import {
+  CompactionSequenceTracker,
   JsonlStore,
   latestCompaction,
   replay,
@@ -306,6 +307,9 @@ async function runAgent(args: AgentArgs): Promise<void> {
       ...(stored.previousSummary === undefined
         ? {}
         : { previousSummary: stored.previousSummary }),
+      ...(stored.previousCarried === undefined
+        ? {}
+        : { previousCarried: stored.previousCarried }),
       ...(stored.persistence === undefined
         ? {}
         : { persistence: stored.persistence }),
@@ -319,6 +323,7 @@ async function runAgent(args: AgentArgs): Promise<void> {
 interface PreparedSession {
   context: Context;
   previousSummary?: Message;
+  previousCarried?: readonly Message[];
   persistence?: AgentLoopPersistence;
 }
 
@@ -348,8 +353,21 @@ async function prepareSession(
 
   let nextSequence =
     records.reduce((highest, record) => Math.max(highest, record.seq), 0) + 1;
-  const previous = latestCompaction(records)?.summary;
+  const latest = latestCompaction(records);
+  const previous = latest?.summary;
   const messages = args.resume ? replay(records, 'compacted') : [];
+  // replay 的结果是 [summary, ...keptUserSeqs 对应的消息（按 seq 排序）,
+  // ...尾巴]；keptUserSeqs 的条数就是 carried 块的长度，直接切片取出。
+  const previousCarried =
+    latest === undefined || (latest.keptUserSeqs?.length ?? 0) === 0
+      ? undefined
+      : messages.slice(1, 1 + (latest.keptUserSeqs?.length ?? 0));
+
+  // 内存视图的下标和磁盘 seq 差一个偏移（视图首条可能是没有 message 记录的
+  // 摘要），记账交给 tracker，不要在这里手算。
+  const sequences = args.resume
+    ? CompactionSequenceTracker.fromRecords(records)
+    : CompactionSequenceTracker.empty();
 
   const persistence: AgentLoopPersistence = {
     async appendMessages(newMessages) {
@@ -359,19 +377,33 @@ async function prepareSession(
           seq: nextSequence,
           message,
         });
+        sequences.recordMessage(nextSequence);
         nextSequence += 1;
       }
     },
     async appendCompaction(result: CompactResult) {
+      if (result.kind !== 'summarize' || result.summary === undefined) return;
+      const { firstKeptSeq, keptUserSeqs } = sequences.compact(
+        result.replacedCount,
+        result.keptUserIndices ?? [],
+      );
       await store.append(sessionId, {
         kind: 'compaction',
         seq: nextSequence,
         summary: result.summary,
+        firstKeptSeq,
+        ...(keptUserSeqs.length === 0 ? {} : { keptUserSeqs }),
         trigger: result.trigger,
         replacedCount: result.replacedCount,
         tokensBefore: result.tokensBefore,
         tokensAfter: result.tokensAfter,
-        meta: result.meta,
+        meta: result.meta ?? {
+          strategy: 'unknown',
+          tokensIn: 0,
+          tokensOut: 0,
+          latencyMs: 0,
+          modelCalls: 0,
+        },
         timestamp: Date.now(),
       });
       nextSequence += 1;
@@ -380,6 +412,7 @@ async function prepareSession(
   return {
     context: { messages },
     ...(previous === undefined ? {} : { previousSummary: previous }),
+    ...(previousCarried === undefined ? {} : { previousCarried }),
     persistence,
   };
 }

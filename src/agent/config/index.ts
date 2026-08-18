@@ -32,7 +32,13 @@ export interface AgentProviderConfig {
 export interface AgentContextConfig extends ContextConfig {
   /** CLI/测试可覆盖模型声明的窗口。 */
   contextWindow?: number;
-  summaryTargetRatio: number;
+  /** 关掉则只用规则剪枝 + StructuralSummarizer，压缩全程不调模型。 */
+  llmSummarizer: boolean;
+  /**
+   * 摘要调用的超时。独立于 loop.turnTimeoutMs（默认 20 分钟）——
+   * 卡住的本地服务不该把整轮预算耗光，超时就降级到规则摘要继续跑。
+   */
+  summarizeTimeoutMs: number;
   /** 本地 tokenizer 目录或 Hugging Face repo id。 */
   tokenizer?: string;
   tokenizerLocalOnly: boolean;
@@ -98,8 +104,20 @@ const DEFAULT_CONFIG: AgentConfig = {
   context: {
     compactThreshold: 0.8,
     memPressureThreshold: 0.75,
-    keepRecentMessages: 6,
-    summaryTargetRatio: 0.4,
+    // 0.8 触发、降到 0.3，留出半个窗口的余量再触发下一次。压缩后第一次真实
+    // 请求必然全量重新 prefill（前缀首条就换成了摘要），所以要少压、压得深。
+    keepRecentRatio: 0.3,
+    summaryMaxTokens: 2_048,
+    // 比 keepRecentRatio 小：剪枝要够得着摘要保留区里的老工具输出。
+    pruneProtectRatio: 0.15,
+    pruneMinTokens: 2_048,
+    // 改过的文件比读过的重要得多；超限时先砍 read，见 core/context/files.ts。
+    maxTrackedFiles: 80,
+    // 131k 窗口约 13k token；用户的原始要求不经过模型转述就能存活，见
+    // ContextConfig.keepUserRatio 的文档。
+    keepUserRatio: 0.1,
+    llmSummarizer: true,
+    summarizeTimeoutMs: 120_000,
     // 本地模型默认不得产生隐式外网请求；联网下载必须由用户显式开启。
     tokenizerLocalOnly: true,
     tokenizerTimeoutMs: 30_000,
@@ -264,8 +282,14 @@ export function configFromEnvironment(
     contextWindow: envNumber(env, 'PPAGENT_MAX_TOKENS'),
     compactThreshold: envNumber(env, 'PPAGENT_COMPACT_THRESHOLD'),
     memPressureThreshold: envNumber(env, 'PPAGENT_MEM_PRESSURE_THRESHOLD'),
-    keepRecentMessages: envNumber(env, 'PPAGENT_KEEP_RECENT_MESSAGES'),
-    summaryTargetRatio: envNumber(env, 'PPAGENT_SUMMARY_TARGET_RATIO'),
+    keepRecentRatio: envNumber(env, 'PPAGENT_KEEP_RECENT_RATIO'),
+    summaryMaxTokens: envNumber(env, 'PPAGENT_SUMMARY_MAX_TOKENS'),
+    pruneProtectRatio: envNumber(env, 'PPAGENT_PRUNE_PROTECT_RATIO'),
+    pruneMinTokens: envNumber(env, 'PPAGENT_PRUNE_MIN_TOKENS'),
+    maxTrackedFiles: envNumber(env, 'PPAGENT_MAX_TRACKED_FILES'),
+    keepUserRatio: envNumber(env, 'PPAGENT_KEEP_USER_RATIO'),
+    llmSummarizer: envBoolean(env, 'PPAGENT_LLM_SUMMARIZER'),
+    summarizeTimeoutMs: envNumber(env, 'PPAGENT_SUMMARIZE_TIMEOUT_MS'),
     tokenizer: nonEmpty(env['PPAGENT_TOKENIZER']),
     tokenizerLocalOnly: envBoolean(env, 'PPAGENT_TOKENIZER_LOCAL_ONLY'),
     tokenizerTimeoutMs: envNumber(env, 'PPAGENT_TOKENIZER_TIMEOUT_MS'),
@@ -353,7 +377,13 @@ function validateConfig(config: AgentConfig): void {
   positiveInteger(config.loop.maxTurns, 'loop.maxTurns');
   positiveInteger(config.loop.turnTimeoutMs, 'loop.turnTimeoutMs');
   nonNegativeInteger(config.loop.maxLengthContinuations, 'loop.maxLengthContinuations');
-  positiveInteger(config.context.keepRecentMessages, 'context.keepRecentMessages');
+  positiveInteger(config.context.summaryMaxTokens, 'context.summaryMaxTokens');
+  positiveInteger(config.context.pruneMinTokens, 'context.pruneMinTokens');
+  positiveInteger(config.context.maxTrackedFiles, 'context.maxTrackedFiles');
+  positiveInteger(config.context.summarizeTimeoutMs, 'context.summarizeTimeoutMs');
+  if (typeof config.context.llmSummarizer !== 'boolean') {
+    throw new Error('context.llmSummarizer must be a boolean');
+  }
   positiveInteger(config.tools.maxResultChars, 'tools.maxResultChars');
   positiveInteger(config.tools.maxConcurrency, 'tools.maxConcurrency');
   positiveInteger(config.tools.toolTimeoutMs, 'tools.toolTimeoutMs');
@@ -384,7 +414,13 @@ function validateConfig(config: AgentConfig): void {
   }
   ratio(config.context.compactThreshold, 'context.compactThreshold');
   ratio(config.context.memPressureThreshold, 'context.memPressureThreshold');
-  ratio(config.context.summaryTargetRatio, 'context.summaryTargetRatio');
+  ratio(config.context.keepRecentRatio, 'context.keepRecentRatio');
+  ratio(config.context.pruneProtectRatio, 'context.pruneProtectRatio');
+  ratio(config.context.keepUserRatio, 'context.keepUserRatio');
+  if (config.context.keepRecentRatio >= config.context.compactThreshold) {
+    // 保留窗口不小于触发阈值时，压缩后立刻又超阈值，每轮都压一次。
+    throw new Error('context.keepRecentRatio must be below context.compactThreshold');
+  }
   optionalNonEmptyString(config.context.tokenizer, 'context.tokenizer');
   if (typeof config.context.tokenizerLocalOnly !== 'boolean') {
     throw new Error('context.tokenizerLocalOnly must be a boolean');

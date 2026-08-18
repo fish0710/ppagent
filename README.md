@@ -147,9 +147,15 @@ node bin/agent.js "删除 /tmp/test.txt"
   "context": {
     "compactThreshold": 0.8,
     "memPressureThreshold": 0.75,
-    "keepRecentMessages": 6,
+    "keepRecentRatio": 0.3,
     "contextWindow": 131072,
-    "summaryTargetRatio": 0.4,
+    "summaryMaxTokens": 2048,
+    "pruneProtectRatio": 0.15,
+    "pruneMinTokens": 2048,
+    "maxTrackedFiles": 80,
+    "keepUserRatio": 0.1,
+    "llmSummarizer": true,
+    "summarizeTimeoutMs": 120000,
     "tokenizer": "Xenova/gpt-4o",
     "tokenizerLocalOnly": true,
     "tokenizerTimeoutMs": 30000
@@ -195,9 +201,15 @@ node bin/agent.js "删除 /tmp/test.txt"
 | `loop.maxLengthContinuations` | `2` | `PPAGENT_MAX_LENGTH_CONTINUATIONS` | `--max-length-continuations` | 模型输出触达 token 上限时自动续写的次数上限 |
 | `context.compactThreshold` | `0.8` | `PPAGENT_COMPACT_THRESHOLD` |  | 触发上下文压缩的占用比例 (0,1] |
 | `context.memPressureThreshold` | `0.75` | `PPAGENT_MEM_PRESSURE_THRESHOLD` |  | 内存压力触发压缩的阈值 (0,1] |
-| `context.keepRecentMessages` | `6` | `PPAGENT_KEEP_RECENT_MESSAGES` |  | 压缩时保留的最近消息数 |
+| `context.keepRecentRatio` | `0.3` | `PPAGENT_KEEP_RECENT_RATIO` |  | 压缩后保留的最近上下文占窗口的比例，必须小于 `compactThreshold` |
 | `context.contextWindow` | 用模型声明的窗口 | `PPAGENT_MAX_TOKENS` | `--max-tokens` | 覆盖模型自带的上下文窗口大小 |
-| `context.summaryTargetRatio` | `0.4` | `PPAGENT_SUMMARY_TARGET_RATIO` |  | 压缩摘要的目标 token 占比 (0,1] |
+| `context.summaryMaxTokens` | `2048` | `PPAGENT_SUMMARY_MAX_TOKENS` |  | 摘要消息的 token 上限，同时是摘要调用的 `maxTokens` |
+| `context.pruneProtectRatio` | `0.15` | `PPAGENT_PRUNE_PROTECT_RATIO` |  | 最近这个比例的 token 内，工具输出免于剪枝 |
+| `context.pruneMinTokens` | `2048` | `PPAGENT_PRUNE_MIN_TOKENS` |  | 剪枝回收量低于此值就不剪，避免为小收益作废前缀缓存 |
+| `context.maxTrackedFiles` | `80` | `PPAGENT_MAX_TRACKED_FILES` |  | 文件清单条数上限；由代码从 toolCall 提取，不经过模型转述，超限先砍 read |
+| `context.keepUserRatio` | `0.1` | `PPAGENT_KEEP_USER_RATIO` |  | 折叠区里保留的真实 user 消息占窗口的比例；user 消息不折叠，超预算从最老的淘汰 |
+| `context.llmSummarizer` | `true` | `PPAGENT_LLM_SUMMARIZER` |  | 关掉则压缩全程不调模型，只做规则剪枝 + 规则摘要 |
+| `context.summarizeTimeoutMs` | `120000` | `PPAGENT_SUMMARIZE_TIMEOUT_MS` |  | 摘要调用超时，独立于 `loop.turnTimeoutMs`；超时降级为规则摘要 |
 | `context.tokenizer` |  | `PPAGENT_TOKENIZER` |  | 本地 tokenizer 目录或 Hugging Face repo id |
 | `context.tokenizerLocalOnly` | `true` | `PPAGENT_TOKENIZER_LOCAL_ONLY` |  | 关闭后才允许联网下载 tokenizer |
 | `context.tokenizerTimeoutMs` | `30000` | `PPAGENT_TOKENIZER_TIMEOUT_MS` |  | |

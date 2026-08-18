@@ -587,7 +587,7 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 
 **开发计划（已完成）**
 1. 定义可注入的 `TokenCounter`，默认用 `o200k_base` BPE tokenizer 做真实分词计账；本地模型 tokenizer 在 M11 可替换，不使用字符数估算。
-2. 实现 token / memory 双阈值策略。把 `keepRecentMessages` 仅作为候选起点，从该处向前寻找不切断 toolCall/toolResult 的安全边界；压缩后 token 不下降时保持原视图。
+2. 实现 token / memory 双阈值策略。切点由 `keepRecentRatio` 折算出的 token 预算给出候选，再对齐到 turn 起点、最后向前寻找不切断 toolCall/toolResult 的安全边界；单个 turn 自己就超预算时（split turn）允许切在 turn 内部的 assistant 消息上；压缩后 token 不下降时保持原视图。
 3. 实现累积式 `StructuralSummarizer`：上一版摘要通过 `previousSummary` 单独传入，新摘要覆盖它代表的全部历史，并以 UserMessage 放在上下文首位。
 4. 把 `replay(records, 'compacted' | 'full')` 做成无 I/O、无输入变更的纯函数，并分别测试最后一次覆盖式压缩投影和完整调试投影。
 5. 实现每 session 一组 `meta.json + records.jsonl` 的 append-only Store；由 loop 负责搬运 message/compaction 记录，不让 context、store、llm 互相依赖。
@@ -595,10 +595,14 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 
 **交付**
 - `core/context/manager.ts` —— 消息存储、token 计账（用 tokenizer 库，别估算）
-- `core/context/compact.ts` —— 实现 `CompactPolicy`
+- `core/context/compact.ts` —— 实现 `CompactPolicy`，两层：先规则剪枝再 LLM 摘要
+- `core/context/prune.ts` —— 规则剪枝层：老工具输出正文换首尾存根、清老 thinking，
+  toolCall 轨迹原样保留；消息条数、角色顺序、调用配对全不变
 - `core/context/tokenizer.ts` —— 可替换的 BPE token 计数器
+- `agent/summarize/llm.ts` —— LLM 摘要器（`context/` 不认识 `llm/`，只能在装配层注入）
 - `core/store/jsonl.ts` —— 每条消息一行 JSON 追加写，恢复时逐行读
 - `core/store/replay.ts` —— compacted/full 两种纯投影
+- `core/store/sequence.ts` —— 把内存视图切点翻译成磁盘 seq，写入 `firstKeptSeq`
 
 **桩**
 ```ts
@@ -613,20 +617,91 @@ shouldCompact(s: CompactSignals) {
 **关键设计**：`context/` 不认识 `llm/`。压缩需要调模型生成摘要，这个能力由 loop 在构造时注入：
 
 loop 只接收 `TokenCounter`、`CompactPolicy`、`Summarizer` 和两个持久化回调。
-`ContextManager` 不 import provider，`JsonlStore` 也不 import loop；摘要策略以后即使换成模型调用，仍由装配层注入。
+`ContextManager` 不 import provider，`JsonlStore` 也不 import loop；`LlmSummarizer` 住在
+`agent/summarize/llm.ts`，由 `agent/session.ts` 构造后注入。
 
 搬运责任也在 loop：从 store 读出消息塞进 context，context 变更后写回 store。两个组件互不认识。
+
+**关键设计**：摘要只调一次模型，且请求前缀与实活上下文逐字节相同。
+
+```
+system   = 与实活会话完全相同的 systemPrompt
+tools    = 与实活会话完全相同的 ToolDef[]
+messages = [ ...当前 context.messages 逐字节相同... , { role:'user', content: 摘要指令 } ]
+```
+
+本地推理服务（llama.cpp / LM Studio / MLX server）的前缀缓存是在渲染并 tokenize 之后的
+prompt 上做最长公共前缀匹配。chat template 把 tools 定义渲染进 system 段 —— 少传一份
+tools，prompt 从第 0 个 token 起就变了，整段 KV 缓存作废。云端 API 用显式 `cache_control`
+断点，对这件事不敏感；本地服务敏感。按 §1 的判据，这一条正是本项目该管的。
+
+代价是 tools 还在请求里，模型可能吐工具调用而不是摘要：指令首尾各写一次 TEXT ONLY，
+运行时丢弃所有 toolcall 事件，产不出正文就降级到规则摘要。同理摘要必须直调
+`provider.stream()`，不能走 `runReactTurn` —— 它的文本工具调用诊断会把摘要正文里出现的
+JSON 误判成配置错误并硬失败。
+
+压缩后第一次真实请求的前缀首条就换成了摘要，必然全量重新 prefill。这是所有头部替换式压缩
+的固有成本，结论是压缩要少而深：默认 0.8 触发、降到 0.3。
 
 **验收**
 ```bash
 node bin/agent.js --session s1 "任务A"
 node bin/agent.js --session s1 --resume "继续上一步"   # 模型记得任务A
-node bin/agent.js --session s2 --max-tokens 2000 "一个需要读十个文件的任务"
-# 观察 compacted 事件触发，且压缩后模型仍能继续工作
+node bin/agent.js --session s2 --max-tokens 8000 "一个需要读十个文件的任务"
+# 先观察到 ⟳ 剪枝（不调模型），历史继续增长后观察到 ⟳ 压缩（token · llm）
 ```
 
 压缩记录采用覆盖式语义，但磁盘记录永不重写。恢复时 `compacted` 投影从后向前取最后一条
-compaction 的累积摘要及其后消息；`full` 投影忽略 compaction，供调试回溯。
+compaction 的累积摘要，加上所有 `seq >= firstKeptSeq` 的 message；`full` 投影忽略
+compaction，供调试回溯。
+
+`firstKeptSeq` 不能省。compaction 记录是在保留消息都写盘之后才追加的，那批保留消息的 seq
+比它小 —— 按记录位置切会把它们全部丢掉，导致 `--resume` 出来的上下文比保持会话时少了最近
+几轮原文，而且不报错。
+
+剪枝结果**不落盘**：它是磁盘原文上的确定性纯函数变换，恢复时重跑一遍结果完全一致，因此
+`StoreRecord` 不需要为剪枝新增变体，replay 保持纯投影。
+
+**关键设计（二期）：把"信任模型"的面积压到最小。**
+
+一期的摘要有个贯穿性弱点：凡是需要跨压缩存活的信息，全都要经过模型转述——文件路径、
+用户约束、早期决策，每压一次就被模型转述一次，转述失真了没人发现。二期的原则是：**凡是
+结构里已经有的，就不问模型；模型只负责结构里没有的判断。**
+
+```
+读过/改过的文件         ToolCallBlock.arguments.path 提取，跨压缩累积       0 次经过模型
+用户的要求与约束         user 消息不折叠，原样留在上下文                    0 次
+已记录的关键决策/约束     解析旧摘要的 ## 段落，harness 搬运，模型只能追加     1 次后冻结
+目标/进展/事实           模型判断                                          1 次后冻结
+已完成流水账             模型归并（这段本来就该压）                         每次
+```
+
+- `core/context/files.ts` —— `extractFileOperations`：扫 toolCall 的 `read`/`write`/`edit`
+  参数，与 `previousDetails` 合并累积；超 `maxTrackedFiles` 先砍 read、保留最近的。摘要模板里
+  的 `<files-read>`/`<files-modified>` 是这个函数的成品，不是要模型填的格式。
+- `agent/summarize/sections.ts` —— 解析/拼装摘要的 `## ` 分段。旧摘要是 harness 自己生成的、
+  标题是 harness 定的，所以也算"结构里已经有的"：`Constraints & preferences`、
+  `Key decisions` 从旧摘要原样搬运，模型只被要求产出"New constraints"/"New decisions"
+  （只列这一轮新出现的），harness 负责追加合并，去重看精确字符串匹配（近似重复放过，最坏
+  是轻微冗余而不是丢失）。超预算时只截 `## Done`（唯一授权被压缩的段），不做全文尾部截断。
+- **user 消息不折叠**：压缩后的上下文是 `[摘要, ...折叠区里保留的 user 原文, ...切点之后的
+  原文]`。只对 user 消息做——它们没有 toolCall/toolResult 配对，单独抽出来不产生孤儿；
+  assistant 不行。预算 `keepUserRatio`，超了从最老的开始淘汰（它已经在最多轮压缩里被模型
+  看过，该经历的都经历过了）。`UserMessage.synthetic` 标记 harness 自己塞的 UserMessage
+  （摘要、`CONTINUE_AFTER_LENGTH_PROMPT`），不打这个标记会让它们被当成"用户的话"
+  无限累积进保留区。
+  - 头部保护区（摘要 + 上一次保留的 user 块）的大小必须外部追踪
+    （`ContextManager.previousCarried`、磁盘上的 `keptUserSeqs`），不能从 messages 数组结构
+    里重新猜——`retained` 尾巴的开头也常常是 user 消息（turn 起点对齐的结果），单靠角色扫描
+    会把它跟保留块混为一谈，导致下次压缩把它当已经保留过的、不再折叠。
+  - 切点搜索的 `minCut` 从"事后校验"改成"搜索硬地板"：`alignToTurnStart`/
+    `searchSafeBoundary` 都不允许把结果落进头部保护区，否则会把保留块里的某条消息误判成
+    新一轮 retained 的起点。
+  - `CompactionSequenceTracker` 从"单一连续保留区"改成维护一份"视图下标 → 磁盘 seq"的
+    镜像数组（`#viewSeqs`，摘要槽位是 `null` 哨兵）：保留区不再是连续一段，而是"挑出来的
+    若干条 user 消息"加"切点之后的连续尾巴"两段拼起来，单一 `firstKeptSeq` 表示不了。
+  - `replay('compacted')` 相应改成 `summary + (seq ∈ keptUserSeqs 或 seq >= firstKeptSeq)`；
+    两组各自已按 seq 单调递增，拼接顺序天然正确，不需要归并。
 
 ---
 

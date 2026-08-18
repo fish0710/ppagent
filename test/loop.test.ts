@@ -359,12 +359,17 @@ describe('agent loop', () => {
           config: {
             compactThreshold: 0.2,
             memPressureThreshold: 0.75,
-            keepRecentMessages: 2,
+            keepRecentRatio: 0.1,
+            summaryMaxTokens: 40,
+            pruneProtectRatio: 0.1,
+            pruneMinTokens: 2_048,
+            maxTrackedFiles: 80,
+            keepUserRatio: 0.1,
           },
           tokenCounter,
         }),
         summarizer: new StructuralSummarizer({ tokenCounter }),
-        contextWindow: 100,
+        contextWindow: 400,
         targetTokens: 40,
       },
       persistence: {
@@ -380,11 +385,107 @@ describe('agent loop', () => {
     expect(result.reason).toBe('stop');
     expect(events.some((event) => event.type === 'compacted')).toBe(true);
     expect(compacted).toHaveLength(1);
-    expect(compacted[0]?.meta.strategy).toBe('structural');
+    expect(compacted[0]?.kind).toBe('summarize');
+    expect(compacted[0]?.meta?.strategy).toBe('structural');
+    expect(compacted[0]?.summary).toBeDefined();
+    // 剪枝碰不到这批历史（全是 user 消息，没有 toolResult），token 还是降了——
+    // 折叠区里真实存在过的原文虽然有一部分作为"保留的 user 消息"整条搬进了
+    // 结果（不再只剩摘要转述），总量仍然比压缩前小。
+    expect(compacted[0]?.tokensAfter).toBeLessThan(compacted[0]?.tokensBefore ?? 0);
     expect(result.context.messages[0]).toMatchObject({ role: 'user' });
-    expect(result.context.messages).toHaveLength(4);
+    // 摘要 + 保留的 user 消息块 + 这一轮模型自己的回复；user 消息不折叠意味着
+    // 这里比"只剩摘要 + retained 尾巴"的旧行为多几条原样保留的历史。
+    expect(result.context.messages).toHaveLength(5);
+    expect(result.context.messages.slice(1, 4).every((message) => message.role === 'user')).toBe(
+      true,
+    );
     expect(persistedMessages).toHaveLength(1);
     expect(persistedMessages[0]?.[0]).toMatchObject({ role: 'assistant' });
+  });
+
+  it('stops at pruning without persisting a compaction record', async () => {
+    const provider = new FauxProvider({ turns: [textTurn('done')] });
+    const events: UIEvent[] = [];
+    const compacted: unknown[] = [];
+    const tokenCounter = new O200kTokenCounter();
+    const base = loopOptions(provider, new ToolRegistry(), events);
+    const noise = 'log line padding\n'.repeat(200);
+
+    const result = await runAgentLoop({
+      ...base,
+      context: {
+        messages: [
+          { role: 'user', content: 'read the logs', timestamp: 1 },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'toolCall', id: 'call-1', name: 'bash', arguments: {} },
+            ],
+            stopReason: 'toolUse',
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+            timestamp: 2,
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'call-1',
+            toolName: 'bash',
+            content: [{ type: 'text', text: noise }],
+            isError: false,
+            timestamp: 3,
+          },
+          { role: 'user', content: 'what went wrong?', timestamp: 4 },
+        ],
+      },
+      compaction: {
+        tokenCounter,
+        policy: new ThresholdCompactPolicy({
+          config: {
+            compactThreshold: 0.2,
+            memPressureThreshold: 0.75,
+            keepRecentRatio: 0.05,
+            summaryMaxTokens: 40,
+            pruneProtectRatio: 0.02,
+            pruneMinTokens: 100,
+            maxTrackedFiles: 80,
+            keepUserRatio: 0.1,
+          },
+          tokenCounter,
+        }),
+        // 剪枝够用时不该走到摘要层。
+        summarizer: {
+          id: 'must-not-run',
+          summarize() {
+            throw new Error('summarizer must not run when pruning is enough');
+          },
+        },
+        contextWindow: 4_000,
+        targetTokens: 40,
+      },
+      persistence: {
+        async appendMessages() {},
+        async appendCompaction(record) {
+          compacted.push(record);
+        },
+      },
+    });
+
+    expect(result.reason).toBe('stop');
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'compact_start', trigger: 'token' }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'compacted', kind: 'prune', prunedCount: 1 }),
+    );
+    // 剪枝是确定性纯函数，恢复时重跑即可，不该写 compaction 记录。
+    expect(compacted).toHaveLength(0);
+    // 结构不变：4 条历史加上本轮的 assistant 回复。
+    expect(result.context.messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'toolResult',
+      'user',
+      'assistant',
+    ]);
   });
 
   it('samples resource pressure per turn and records a memory-triggered compact', async () => {
@@ -418,12 +519,17 @@ describe('agent loop', () => {
           config: {
             compactThreshold: 1,
             memPressureThreshold: 0.75,
-            keepRecentMessages: 2,
+            keepRecentRatio: 0.1,
+            summaryMaxTokens: 40,
+            pruneProtectRatio: 0.1,
+            pruneMinTokens: 2_048,
+            maxTrackedFiles: 80,
+            keepUserRatio: 0.1,
           },
           tokenCounter,
         }),
         summarizer: new StructuralSummarizer({ tokenCounter }),
-        contextWindow: 1_000_000,
+        contextWindow: 400,
         targetTokens: 40,
         resourceProbe: { snapshot },
       },

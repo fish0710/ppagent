@@ -77,7 +77,20 @@ export function renderTuiFrame(
     return { transcript: state.transcript, live };
   }
 
-  if (state.phase === 'prefill') {
+  if (state.phase === 'compacting') {
+    // 压缩可能是几十秒的模型调用，必须有自己的活动指示，否则界面看起来是卡死的。
+    const elapsed = Math.max(0, nowMs - (state.compactStartedAtMs ?? nowMs));
+    const context = formatContext(state.contextTokens, state.contextWindow);
+    live.push(
+      truncateToWidth(
+        `${spinner(nowMs)} 压缩上下文${
+          context === '' ? '' : ` ${context}`
+        } · 已 ${formatDuration(elapsed)}`,
+        safeWidth,
+        '…',
+      ),
+    );
+  } else if (state.phase === 'prefill') {
     const elapsed = Math.max(0, nowMs - (state.turnStartedAtMs ?? nowMs));
     const context = formatContext(state.contextTokens, state.contextWindow);
     live.push(

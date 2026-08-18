@@ -33,14 +33,23 @@ export function replay(
   if (compactIndex === -1) return replay(ordered, 'full');
   const compact = ordered[compactIndex];
   if (compact?.kind !== 'compaction') return [];
-  const trailing = ordered
-    .slice(compactIndex + 1)
+  // 按 firstKeptSeq 切，不能按记录位置切。compaction 记录是在保留消息都写盘
+  // 之后才追加的，那批保留消息的 seq 比它小 —— 按位置切会把压缩后仍在内存
+  // 视图里的最近几轮原文全部丢掉，而且不报错。
+  //
+  // keptUserSeqs 是折叠区里原样保留的 user 消息（user 消息不折叠策略），全部
+  // 小于 firstKeptSeq——它们来自被摘要取代的那段历史，只是没有被折叠。按 seq
+  // 排序后天然排在 firstKeptSeq 之后的原文之前，不需要额外的归并逻辑。老记录
+  // 没有这个字段时按空数组处理，行为等同于没有保留过 user 消息。
+  const keptUserSeqs = new Set(compact.keptUserSeqs ?? []);
+  const kept = ordered
     .filter(
       (record): record is Extract<StoreRecord, { kind: 'message' }> =>
-        record.kind === 'message',
+        record.kind === 'message' &&
+        (keptUserSeqs.has(record.seq) || record.seq >= compact.firstKeptSeq),
     )
     .map((record) => record.message);
-  return structuredClone([compact.summary, ...trailing]);
+  return structuredClone([compact.summary, ...kept]);
 }
 
 export function latestCompaction(

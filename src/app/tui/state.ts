@@ -8,6 +8,8 @@ import type {
 export type TuiPhase =
   | 'idle'
   | 'prefill'
+  /** 压缩上下文中。LLM 摘要在本地机器上可能跑几十秒，需要单独的相位。 */
+  | 'compacting'
   | 'decode'
   | 'tool_running'
   | 'confirming'
@@ -34,6 +36,8 @@ export interface TuiState {
   decodedCharacters: number;
   contextTokens?: number;
   contextWindow?: number;
+  compactStartedAtMs?: number;
+  phaseBeforeCompaction?: TuiPhase;
   activeTools: Readonly<Record<string, TuiToolActivity>>;
   phaseBeforeConfirmation?: TuiPhase;
   lastUsage?: Usage;
@@ -149,9 +153,20 @@ export function reduceTuiState(
       ]);
     case 'admission_denied':
       return appendTranscript(state, [formatAdmissionDenied(action)]);
+    case 'compact_start':
+      return {
+        ...state,
+        phase: 'compacting',
+        compactStartedAtMs: nowMs,
+        phaseBeforeCompaction: state.phase,
+      };
+    case 'compact_skipped':
+      return appendTranscript(endCompaction(state), [
+        `⟳ 未压缩：${oneLine(action.reason)}`,
+      ]);
     case 'compacted':
       return appendTranscript(
-        { ...state, contextTokens: action.tokensAfter },
+        { ...endCompaction(state), contextTokens: action.tokensAfter },
         [formatCompaction(action)],
       );
     case 'turn_end':
@@ -164,6 +179,19 @@ export function reduceTuiState(
         [`⊘ ${oneLine(action.message)}`],
       );
   }
+}
+
+/**
+ * 回到压缩开始前的相位，而不是硬编码成 prefill —— 自动压缩发生在 turn_start
+ * 之后（回到 prefill），手动 /compact 发生在 idle（该回到 idle）。
+ */
+function endCompaction(state: TuiState): TuiState {
+  const {
+    compactStartedAtMs: _startedAt,
+    phaseBeforeCompaction,
+    ...rest
+  } = state;
+  return { ...rest, phase: phaseBeforeCompaction ?? state.phase };
 }
 
 function resolvePermission(
@@ -288,11 +316,20 @@ function formatCompaction(event: Extract<UIEvent, { type: 'compacted' }>): strin
       : event.trigger === 'token'
         ? '上下文阈值'
         : '手动触发';
-  const source =
-    event.resourceSource === undefined ? '' : ` · ${resourceLabel(event.resourceSource)}`;
-  return `⟳ 压缩 ${formatTokenCount(event.tokensBefore)}→${formatTokenCount(
+  // 剪枝和摘要的信息损失不是一个量级，标签必须能区分：剪枝只降了老工具输出
+  // 的保真度，摘要则把那段历史整个换成了模型的转述。
+  const label = event.kind === 'prune' ? '剪枝' : '压缩';
+  const detail = [
+    trigger,
+    ...(event.strategy === undefined ? [] : [event.strategy]),
+    ...(event.kind === 'prune' ? [`${event.prunedCount} 条工具输出`] : []),
+    ...(event.resourceSource === undefined
+      ? []
+      : [resourceLabel(event.resourceSource)]),
+  ].join(' · ');
+  return `⟳ ${label} ${formatTokenCount(event.tokensBefore)}→${formatTokenCount(
     event.tokensAfter,
-  )}（${trigger}${source}）`;
+  )}（${detail}）`;
 }
 
 function resourceLabel(source: ResourceSnapshot['source']): string {

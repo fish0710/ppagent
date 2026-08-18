@@ -5,7 +5,7 @@ import { TuiTerminalRenderer } from './render.js';
 
 export type TuiSessionPort = Pick<
   AgentSession,
-  'prompt' | 'abort' | 'subscribe' | 'setInteraction'
+  'prompt' | 'compact' | 'abort' | 'subscribe' | 'setInteraction'
 >;
 
 export interface TuiAppOptions {
@@ -98,8 +98,14 @@ export class TuiApp {
         if (!promptWasRendered) this.renderer.submitPrompt(prompt);
         this.#running = true;
         try {
-          const result = await session.prompt(prompt);
-          if (result.reason === 'error' || result.reason === 'maxTurns') exitCode = 1;
+          // /compact [说明]：在撞到阈值之前主动腾地方，可选的说明会附加到摘要指令后。
+          const compactArgs = slashArguments(prompt, '/compact');
+          if (compactArgs !== null) {
+            await session.compact(compactArgs.length === 0 ? undefined : compactArgs);
+          } else {
+            const result = await session.prompt(prompt);
+            if (result.reason === 'error' || result.reason === 'maxTurns') exitCode = 1;
+          }
         } catch (error) {
           exitCode = 1;
           this.renderer.render({ type: 'error', message: errorMessage(error) });
@@ -155,4 +161,15 @@ export class TuiApp {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 命中斜杠命令时返回其参数（可能是空串），否则返回 null。
+ * 只认完整命令词，"/compacted" 这类前缀相同的普通输入不会被误判。
+ */
+function slashArguments(prompt: string, command: string): string | null {
+  if (prompt === command) return '';
+  return prompt.startsWith(`${command} `)
+    ? prompt.slice(command.length + 1).trim()
+    : null;
 }

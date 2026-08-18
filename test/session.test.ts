@@ -29,6 +29,100 @@ afterEach(async () => {
 });
 
 describe('AgentSession', () => {
+  it('compacts on demand through a single cache-warm model call', async () => {
+    const provider = new FauxProvider({
+      turns: [textTurn('## Goal\nhand-written summary')],
+    });
+    const model = provider.listModels()[0];
+    if (model === undefined) throw new Error('Missing faux model');
+    const persisted: unknown[] = [];
+    const events: UIEvent[] = [];
+    const session = createAgentSession({
+      config: mergeAgentConfig({
+        context: { contextWindow: 2_000, keepRecentRatio: 0.05 },
+      }),
+      provider,
+      model,
+      cwd: process.cwd(),
+      interaction: interaction(async () => false),
+      admission: new StubAdmissionController(),
+      context: {
+        // user/assistant 轮流出现：user 消息不折叠，若整段历史全是 user，
+        // 折叠区会被 selectCarriedUsers 原样搬空，摘要没有真正折叠掉任何
+        // 东西（复述 + 保留一份重复），触发 IneffectiveCompactionError。
+        // 混入 assistant 回复，让折叠路径依旧有实质内容可压缩。
+        messages: Array.from({ length: 6 }, (_, index) => [
+          {
+            role: 'user' as const,
+            content: `history ${index} ${'detail '.repeat(40)}`,
+            timestamp: index * 2 + 1,
+          },
+          {
+            role: 'assistant' as const,
+            content: [{ type: 'text' as const, text: `reply ${index} ${'detail '.repeat(40)}` }],
+            stopReason: 'stop' as const,
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+            timestamp: index * 2 + 2,
+          },
+        ]).flat(),
+      },
+      persistence: {
+        async appendMessages() {},
+        async appendCompaction(record) {
+          persisted.push(record);
+        },
+      },
+    });
+    session.subscribe((event) => events.push(event));
+
+    const result = await session.compact('重点记住失败过的命令');
+
+    expect(result?.kind).toBe('summarize');
+    expect(result?.meta?.modelCalls).toBe(1);
+    expect(provider.pendingTurns()).toBe(0);
+    expect(persisted).toHaveLength(1);
+    expect(events.map((event) => event.type)).toEqual([
+      'compact_start',
+      'compacted',
+    ]);
+    expect(events[0]).toMatchObject({ trigger: 'manual' });
+    // 压缩后的视图是 [摘要, ...保留的 user 消息, ...保留的最近消息]，顺序不变。
+    expect(session.context.messages[0]).toMatchObject({ role: 'user' });
+    expect(session.context.messages.length).toBeLessThan(12);
+    expect(session.context.messages.at(-1)).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: `reply 5 ${'detail '.repeat(40)}` }],
+      stopReason: 'stop',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      timestamp: 12,
+    });
+  });
+
+  it('reports a skipped compaction instead of leaving the UI mid-flight', async () => {
+    const provider = new FauxProvider({ turns: [] });
+    const model = provider.listModels()[0];
+    if (model === undefined) throw new Error('Missing faux model');
+    const events: UIEvent[] = [];
+    const session = createAgentSession({
+      config: mergeAgentConfig(),
+      provider,
+      model,
+      cwd: process.cwd(),
+      interaction: interaction(async () => false),
+      admission: new StubAdmissionController(),
+      context: { messages: [{ role: 'user', content: 'hi', timestamp: 1 }] },
+    });
+    session.subscribe((event) => events.push(event));
+
+    expect(await session.compact()).toBeNull();
+    // compact_start 之后必须有收尾事件，否则界面停在压缩相位。
+    expect(events.map((event) => event.type)).toEqual([
+      'compact_start',
+      'compact_skipped',
+    ]);
+  });
+
+
   it('runs the default subagent session and returns its final report to the parent', async () => {
     const provider = new FauxProvider({
       turns: [
