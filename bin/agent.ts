@@ -541,7 +541,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
       if (arg === '--provider') provider = value;
       else if (arg === '--model') model = value;
       else if (arg === '--max-turns') {
-        maxTurns = positiveInteger(value, '--max-turns');
+        maxTurns = nonNegativeInteger(value, '--max-turns');
       } else if (arg === '--max-tokens') {
         maxTokens = positiveInteger(value, '--max-tokens');
       } else if (arg === '--max-output-tokens') {
@@ -563,7 +563,7 @@ async function parseAgentArgs(args: string[]): Promise<AgentArgs> {
           '--max-length-continuations',
         );
       } else if (arg === '--turn-timeout-ms') {
-        turnTimeoutMs = positiveInteger(value, '--turn-timeout-ms');
+        turnTimeoutMs = nonNegativeInteger(value, '--turn-timeout-ms');
       } else if (arg === '--request-timeout-ms') {
         requestTimeoutMs = positiveInteger(value, '--request-timeout-ms');
       } else if (arg === '--max-retries') {

@@ -146,11 +146,24 @@ describe('agent config', () => {
 
   it('validates merged numeric constraints at the agent boundary', () => {
     expect(() =>
-      mergeAgentConfig({ loop: { maxTurns: 0 } }),
-    ).toThrow('loop.maxTurns must be a positive integer');
+      mergeAgentConfig({ loop: { maxTurns: -1 } }),
+    ).toThrow('loop.maxTurns must be a non-negative integer');
+    expect(() =>
+      mergeAgentConfig({ loop: { turnTimeoutMs: -1 } }),
+    ).toThrow('loop.turnTimeoutMs must be a non-negative integer');
     expect(() =>
       configFromEnvironment({ PPAGENT_MAX_TURNS: 'many' }),
     ).toThrow('PPAGENT_MAX_TURNS must be a number');
+  });
+
+  it('accepts 0 for loop.maxTurns and loop.turnTimeoutMs (disabled)', () => {
+    const config = mergeAgentConfig({
+      loop: { maxTurns: 0, turnTimeoutMs: 0 },
+    });
+    expect(config.loop).toMatchObject({ maxTurns: 0, turnTimeoutMs: 0 });
+    expect(configFromEnvironment({ PPAGENT_MAX_TURNS: '0' }).loop).toMatchObject({
+      maxTurns: 0,
+    });
   });
 
   it('merges maxOutputTokens/effort/maxLengthContinuations across file < env < CLI', async () => {

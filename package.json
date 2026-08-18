@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "pp": "bin/agent.js"
+    "ppa": "bin/agent.js"
   },
   "engines": {
     "node": ">=22.19.0"

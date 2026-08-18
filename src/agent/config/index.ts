@@ -374,8 +374,8 @@ function validateConfig(config: AgentConfig): void {
   if (config.provider.maxRetries !== undefined) {
     nonNegativeInteger(config.provider.maxRetries, 'provider.maxRetries');
   }
-  positiveInteger(config.loop.maxTurns, 'loop.maxTurns');
-  positiveInteger(config.loop.turnTimeoutMs, 'loop.turnTimeoutMs');
+  nonNegativeInteger(config.loop.maxTurns, 'loop.maxTurns');
+  nonNegativeInteger(config.loop.turnTimeoutMs, 'loop.turnTimeoutMs');
   nonNegativeInteger(config.loop.maxLengthContinuations, 'loop.maxLengthContinuations');
   positiveInteger(config.context.summaryMaxTokens, 'context.summaryMaxTokens');
   positiveInteger(config.context.pruneMinTokens, 'context.pruneMinTokens');

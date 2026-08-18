@@ -165,6 +165,94 @@ describe('agent loop', () => {
     expect(result.reason).toBe('maxTurns');
   });
 
+  it('runs without an artificial turn cap when maxTurns is 0', async () => {
+    const provider = new FauxProvider({
+      turns: [
+        toolCallTurn({ name: 'probe', rawArguments: '{"value":"1"}' }),
+        toolCallTurn({ name: 'probe', rawArguments: '{"value":"2"}' }),
+        toolCallTurn({ name: 'probe', rawArguments: '{"value":"3"}' }),
+        toolCallTurn({ name: 'probe', rawArguments: '{"value":"4"}' }),
+        toolCallTurn({ name: 'probe', rawArguments: '{"value":"5"}' }),
+        textTurn('done'),
+      ],
+    });
+    const events: UIEvent[] = [];
+    const result = await runAgentLoop({
+      ...loopOptions(provider, new ToolRegistry([probeTool()]), events),
+      loopConfig: { maxTurns: 0, turnTimeoutMs: 1_000, maxLengthContinuations: 2 },
+    });
+
+    expect(result.reason).toBe('stop');
+    expect(result.turns).toBe(6);
+  });
+
+  it('still enforces the continuation budget when maxTurns is 0', async () => {
+    const provider = new FauxProvider({
+      turns: [
+        lengthTurn('first chunk'),
+        lengthTurn('second chunk'),
+        lengthTurn('third chunk'),
+      ],
+    });
+    const events: UIEvent[] = [];
+    const result = await runAgentLoop({
+      ...loopOptions(provider, new ToolRegistry([probeTool()]), events),
+      loopConfig: { maxTurns: 0, turnTimeoutMs: 1_000, maxLengthContinuations: 2 },
+    });
+
+    expect(result.reason).toBe('error');
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        message: expect.stringContaining('automatic continuation'),
+      }),
+    );
+  });
+
+  it('turnTimeoutMs 0 disables the per-turn deadline but still honors root cancel', async () => {
+    const controller = new AbortController();
+    const provider = new FauxProvider({
+      turns: [textTurn('slow', { delayMs: 100 })],
+    });
+    const events: UIEvent[] = [];
+    const execution = runAgentLoop({
+      ...loopOptions(provider, new ToolRegistry([probeTool()]), events, controller),
+      loopConfig: { maxTurns: 4, turnTimeoutMs: 0, maxLengthContinuations: 2 },
+    });
+    setTimeout(() => controller.abort(new Error('cancelled by test')), 5);
+
+    const result = await execution;
+
+    expect(result.reason).toBe('aborted');
+    expect(events.at(-1)).toEqual({
+      type: 'loop_end',
+      reason: 'aborted',
+      turns: 1,
+    });
+  });
+
+  it('rejects negative maxTurns/turnTimeoutMs but accepts 0', async () => {
+    const provider = new FauxProvider({ turns: [textTurn('done')] });
+    const events: UIEvent[] = [];
+    await expect(
+      runAgentLoop({
+        ...loopOptions(provider, new ToolRegistry([probeTool()]), events),
+        loopConfig: { maxTurns: -1, turnTimeoutMs: 1_000, maxLengthContinuations: 2 },
+      }),
+    ).rejects.toThrow('maxTurns must be a non-negative integer');
+    await expect(
+      runAgentLoop({
+        ...loopOptions(provider, new ToolRegistry([probeTool()]), events),
+        loopConfig: { maxTurns: 4, turnTimeoutMs: -1, maxLengthContinuations: 2 },
+      }),
+    ).rejects.toThrow('turnTimeoutMs must be a non-negative integer');
+    const ok = await runAgentLoop({
+      ...loopOptions(provider, new ToolRegistry([probeTool()]), events),
+      loopConfig: { maxTurns: 0, turnTimeoutMs: 0, maxLengthContinuations: 2 },
+    });
+    expect(ok.reason).toBe('stop');
+  });
+
   it('emits an explicit aborted termination when the user cancels', async () => {
     const controller = new AbortController();
     const exporter = new InMemorySpanExporter();

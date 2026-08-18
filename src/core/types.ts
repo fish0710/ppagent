@@ -905,8 +905,9 @@ export type UIEvent =
 // ============================================================================
 
 export interface LoopConfig {
+  /** 最大轮数；0 表示不限制（此时只能以 stop/error/aborted 退出；模型持续产出工具调用时可持续运行，由根取消或模型自身的 stop/error 终结）。 */
   maxTurns: number;
-  /** 单轮最长耗时，超时后中断 */
+  /** 单轮最长耗时，超时后中断；0 表示不限时（仅根取消能中断一轮）。 */
   turnTimeoutMs: number;
   /** stopReason === 'length' 时自动续写的最大次数；0 表示禁用，立即报错。 */
   maxLengthContinuations: number;

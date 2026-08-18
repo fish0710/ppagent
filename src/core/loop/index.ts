@@ -159,7 +159,10 @@ export async function runAgentLoop(
   try {
     if (signal.aborted) return finish('aborted', 0);
 
-    for (let turn = 1; turn <= options.loopConfig.maxTurns; turn += 1) {
+    // 0 表示不限制轮数；此时 maxTurns 仅作哨兵判断依据，循环条件恒真，只能靠 return 退出。
+    const maxTurns = options.loopConfig.maxTurns;
+
+    for (let turn = 1; maxTurns === 0 || turn <= maxTurns; turn += 1) {
     if (signal.aborted) return finish('aborted', turn - 1);
     emit({
       type: 'turn_start',
@@ -387,8 +390,9 @@ export async function runAgentLoop(
           });
           return finish('error', turn);
         }
-        // 已执行完最后允许的一轮动作，但没有额度让模型读取结果并继续。
-        if (turn === options.loopConfig.maxTurns) {
+        // 已执行完最后允许的一轮动作，但没有额度让模型读取结果并继续；
+        // maxTurns=0 时不限轮数，turn 从 1 递增，turn === maxTurns 永不成立。
+        if (turn === maxTurns) {
           return finish('maxTurns', turn);
         }
         continue;
@@ -401,7 +405,7 @@ export async function runAgentLoop(
         case 'aborted':
           return finish('aborted', turn);
         case 'length': {
-          if (turn === options.loopConfig.maxTurns) {
+          if (turn === maxTurns) {
             return finish('maxTurns', turn);
           }
           if (lengthContinuations >= options.loopConfig.maxLengthContinuations) {
@@ -466,8 +470,8 @@ export async function runAgentLoop(
     }
     }
 
-    // for 的上限已经在工具继续分支显式返回；保留为不可达防线。
-    return finish('maxTurns', options.loopConfig.maxTurns);
+    // 循环体所有出口均已显式 return；此处仅为满足类型穷尽性所需的不可达防线。
+    return finish('maxTurns', maxTurns);
   } finally {
     loopSpan?.end(
       {
@@ -504,12 +508,16 @@ function createTurnControl(
   const onAbort = (): void => controller.abort(parent.reason);
   if (parent.aborted) controller.abort(parent.reason);
   else parent.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => {
-    timeoutReached = true;
-    controller.abort(new Error(`Agent turn ${turn} timed out`));
-  }, timeoutMs);
+  // 0 表示不设单轮 deadline；此时只有根取消能中断一轮，挂起风险由调用方承担。
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timeoutReached = true;
+          controller.abort(new Error(`Agent turn ${turn} timed out`));
+        }, timeoutMs)
+      : undefined;
   // deadline 不应单独阻止一个已无其他工作的 Node 进程退出。
-  timer.unref();
+  timer?.unref();
   return {
     signal: controller.signal,
     timedOut: () => timeoutReached,
@@ -523,15 +531,15 @@ function createTurnControl(
 function validateOptions(options: AgentLoopOptions): void {
   if (
     !Number.isInteger(options.loopConfig.maxTurns) ||
-    options.loopConfig.maxTurns < 1
+    options.loopConfig.maxTurns < 0
   ) {
-    throw new Error('maxTurns must be a positive integer');
+    throw new Error('maxTurns must be a non-negative integer (0 = unlimited)');
   }
   if (
     !Number.isInteger(options.loopConfig.turnTimeoutMs) ||
-    options.loopConfig.turnTimeoutMs < 1
+    options.loopConfig.turnTimeoutMs < 0
   ) {
-    throw new Error('turnTimeoutMs must be a positive integer');
+    throw new Error('turnTimeoutMs must be a non-negative integer (0 = no deadline)');
   }
   const concurrency = options.maxToolConcurrency ?? 4;
   if (!Number.isInteger(concurrency) || concurrency < 1) {
