@@ -1,4 +1,7 @@
 #!/bin/sh
+# Fast local checkpoint: architecture rules + typecheck. Full test suite
+# runs at pre-push; the platform matrix is CI's job (see AGENTS.md).
+set -e
 
 npx depcruise src bin test --config .dependency-cruiser.cjs
-npx tsc -p tsconfig.json --noEmit && npx tsc -p tsconfig.bin.json --noEmit
+npm run typecheck

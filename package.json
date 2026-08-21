@@ -16,7 +16,9 @@
     "build:bin": "tsc -p tsconfig.bin.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.bin.json --noEmit && tsc -p tsconfig.test.json",
     "depcruise": "depcruise src bin test --config .dependency-cruiser.cjs",
+    "verify": "npm run typecheck && npm run depcruise && npm test",
     "prepare": "git config core.hooksPath .husky"
   },
   "repository": {

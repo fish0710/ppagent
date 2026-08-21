@@ -1,0 +1,6 @@
+#!/bin/sh
+# Full local gate before code leaves this machine: typecheck + architecture
+# rules + test suite. CI still owns the ubuntu/macos platform matrix.
+set -e
+
+npm run verify

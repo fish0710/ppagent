@@ -9,7 +9,7 @@ describe('pi-ai local OpenAI-compatible provider', () => {
 
   it('streams without sending an Authorization header when no key is configured', async () => {
     let request: Request | undefined;
-    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       request = new Request(input, init);
       return localSseResponse();
     });
@@ -44,7 +44,7 @@ describe('pi-ai local OpenAI-compatible provider', () => {
 
   it('sends only an explicitly configured custom API key', async () => {
     let request: Request | undefined;
-    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       request = new Request(input, init);
       return localSseResponse();
     });

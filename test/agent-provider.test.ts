@@ -39,7 +39,7 @@ describe('configured provider selection', () => {
 
   it('scopes a local API key to the selected alias', async () => {
     let request: Request | undefined;
-    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       request = new Request(input, init);
       return new Response(
         [

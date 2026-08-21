@@ -45,7 +45,7 @@ describe('LaminarSpanExporter', () => {
       new Response('busy', { status: 503 }),
       new Response('{}', { status: 200 }),
     ];
-    const fetchMock = vi.fn(async () => responses.shift() ?? new Response('{}'));
+    const fetchMock = vi.fn(async (..._args: Parameters<typeof fetch>) => responses.shift() ?? new Response('{}'));
     const sleep = vi.fn(async () => undefined);
     const exporter = new LaminarSpanExporter({
       apiKey: 'secret-project-key',

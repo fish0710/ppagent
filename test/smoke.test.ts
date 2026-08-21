@@ -10,26 +10,13 @@ describe('M0 smoke', () => {
     expect(1 + 1).toBe(2);
   });
 
-  it('core/types.ts 存在且不 import 任何模块', () => {
-    const src = readFileSync(join(ROOT, '..', 'src', 'core', 'types.ts'), 'utf-8');
-    expect(src.trim().length).toBeGreaterThan(0);
-    expect(src).not.toMatch(/^\s*import\s/m);
-  });
-
   it('package.json 为 type: module', () => {
     const pkg = JSON.parse(
       readFileSync(join(ROOT, '..', 'package.json'), 'utf-8'),
     ) as { type?: string };
     expect(pkg.type).toBe('module');
   });
-
-  it('core tokenizer 不直接执行文件或网络 IO', () => {
-    const src = readFileSync(
-      join(ROOT, '..', 'src', 'core', 'context', 'tokenizer.ts'),
-      'utf-8',
-    );
-    expect(src).not.toMatch(/from ['"]node:(?:fs|path)/u);
-    expect(src).not.toContain('@huggingface/tokenizers');
-    expect(src).not.toMatch(/\bfetch\s*\(/u);
-  });
 });
+
+// 源码守卫断言（core/types.ts 无 import、tokenizer.ts 无 IO 等）已迁到
+// test/guards.test.ts，与项目级 harness 的其余不变量放在一起维护。
