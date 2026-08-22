@@ -14,6 +14,7 @@ bin/        CLI entry (bin/agent.ts), builds to dist/ + bin/*.js
 test/       flat *.test.ts mirroring src/ module names; test/guards.test.ts holds source-invariant checks
 docs/       architecture (agent-开发设计书.md), lessons (ppagent-错题本.md), decisions (notes/)
 benchmark/  Harbor / Terminal-Bench adapter (Python)
+probe/      3-task Terminal-Bench calibration/estimation scripts (Python + bash), see probe/README.md
 ```
 
 ## Commands

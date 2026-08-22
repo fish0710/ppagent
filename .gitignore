@@ -8,3 +8,7 @@ bin/agent.js.map
 agent.local.json
 __pycache__/
 *.pyc
+
+terminal-bench-*
+jobs/
+probe-out/

@@ -129,17 +129,14 @@ class PPAgent(BaseInstalledAgent):
             raise ValueError("Model name must be provider/model_name")
         provider, model = self.model_name.split("/", 1)
         flags = self.build_cli_flags()
+        # 前缀匹配而非固定清单：src/agent/config 里任何 PPAGENT_* 配置项都应该能通过
+        # `harbor run --ae` 透传进容器覆盖 ppagent 自己的配置解析，不用每加一个配置项
+        # 就回来加一行白名单——旧的固定六项清单曾经悄悄吞掉 PPAGENT_EFFORT /
+        # PPAGENT_TURN_TIMEOUT_MS 等变量，调用方以为生效了，容器里其实用的是默认值。
         env = {
             key: value
-            for key in (
-                "PPAGENT_CUSTOM_BASE_URL",
-                "PPAGENT_CUSTOM_API_KEY",
-                "PPAGENT_TOKENIZER",
-                "PPAGENT_TOKENIZER_LOCAL_ONLY",
-                "LMNR_PROJECT_API_KEY",
-                "PPAGENT_LAMINAR_ENDPOINT",
-            )
-            if (value := os.environ.get(key))
+            for key, value in os.environ.items()
+            if value and (key.startswith("PPAGENT_") or key == "LMNR_PROJECT_API_KEY")
         }
         await self.exec_as_agent(
             environment,
