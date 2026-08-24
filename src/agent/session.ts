@@ -5,9 +5,19 @@ import {
   createSpawnSubagentTool,
   type SpawnSubagentRunner,
 } from './tools/spawn-subagent.js';
+import { createMemorySearchTool } from './tools/memory-search.js';
 import { StructuralSummarizer } from '../core/context/compact.js';
 import { ThresholdCompactPolicy } from '../core/context/compact.js';
 import { LlmSummarizer } from './summarize/llm.js';
+import {
+  LlmMemoryExtractor,
+  patchMemoryRecord,
+  writeMemoryRecord,
+  type MemoryExtractor,
+  type MemoryStores,
+  type MemoryUsageLog,
+} from './memory/index.js';
+import { detectAdoption } from '../core/memory/adopt.js';
 import { ContextManager } from '../core/context/manager.js';
 import { O200kTokenCounter } from '../core/context/tokenizer.js';
 import type {
@@ -36,6 +46,7 @@ import type {
   CompactResult,
   Context,
   Interaction,
+  MemoryRecord,
   Message,
   ModelRef,
   PermissionPolicy,
@@ -43,6 +54,7 @@ import type {
   ReadonlyContext,
   ResourceProbe,
   Sandbox,
+  SessionId,
   StreamOptions,
   Summarizer,
   TokenCounter,
@@ -86,6 +98,23 @@ export interface AgentSessionOptions {
   flushTelemetryOnPrompt?: boolean;
   now?: () => number;
   traceFactory?: () => TraceContext;
+  /** 记忆写入目标；未提供时即使 config.memory.enabled 也不抽取——没地方写等同于关闭。 */
+  memoryStores?: MemoryStores;
+  /** project scope 记忆的归属键；调用方（bin/agent.ts）已经为检索算过一次，这里复用，不重复起 git 子进程。 */
+  projectKey?: string;
+  /** 测试注入；未提供时用 LlmMemoryExtractor。 */
+  memoryExtractor?: MemoryExtractor;
+  /** 记忆记录的 sourceSessionId；未提供时用 'ephemeral'（没有 --session 的一次性会话）。 */
+  sessionId?: SessionId;
+  /**
+   * 本次会话真正注入 systemPrompt 的记忆记录（调用方从 retrieveMemoryBlock
+   * 的 included 里拿到）。用于曝光计数与采纳检测；--resume 路径下调用方不会
+   * 提供这个字段（原始选中的具体记录没有持久化），resume 出的会话不参与
+   * 曝光/采纳反馈——这是 v1 接受的已知缺口。
+   */
+  injectedMemories?: readonly MemoryRecord[];
+  /** 采纳反馈的落盘目标；未提供时曝光计数/采纳检测正常算，但不写事件流。 */
+  memoryUsageLog?: MemoryUsageLog;
 }
 
 /**
@@ -167,6 +196,20 @@ export class DefaultAgentSession implements AgentSession {
         createSpawnSubagentTool(
           options.subagentRunner ?? ((task, context) => this.#runSubagent(task, context)),
         ),
+        // 默认不注册：工具定义会被 chat template 渲染进 system 段，每次
+        // 请求都计费；config.memory.searchTool 关闭时这里什么都不加。
+        // 也需要 memoryStores/projectKey——没地方查、不知道查哪个项目，
+        // 注册了也是摆设。
+        ...(options.config.memory.searchTool &&
+        options.memoryStores !== undefined &&
+        options.projectKey !== undefined
+          ? [
+              createMemorySearchTool({
+                stores: options.memoryStores,
+                projectKey: options.projectKey,
+              }),
+            ]
+          : []),
       ]);
     this.#now = options.now ?? Date.now;
     this.#traceFactory = options.traceFactory ?? createTraceContext;
@@ -329,6 +372,8 @@ export class DefaultAgentSession implements AgentSession {
         emit: (event) => this.#emit(event),
       });
       this.#context = result.context;
+      await this.#trackMemoryUsage(result);
+      await this.#extractMemory(result, controller.signal);
       return result;
     } finally {
       if (this.#controller === controller) this.#controller = undefined;
@@ -385,6 +430,115 @@ export class DefaultAgentSession implements AgentSession {
       fallback: structural,
       maxTokens: config.context.summaryMaxTokens,
       timeoutMs: config.context.summarizeTimeoutMs,
+      notify: (message) => this.#emit({ type: 'notify', level: 'warn', message }),
+      now: this.#now,
+    });
+  }
+
+  /**
+   * 曝光计数 + 采纳检测 + deprecate 规则，三件事绑在一起做，因为它们共享
+   * 同一份 injectedMemories 和同一次 detectAdoption 调用结果。不调模型，
+   * 不受 GPU 忙的门禁约束——纯粹是磁盘读写。
+   *
+   * deprecate 规则只做优先级最高的那条：一条记忆被反复采纳却经常导向
+   * maxTurns/error，是在主动误导 agent，危害远大于一条从没被召回的记忆
+   * （落地计划第 3.6 节）。'aborted' 既不算好也不算坏——用户主动取消不是
+   * 这条记忆的锅，只计曝光和采纳，不进 adoptedOk/adoptedBad 的任何一边。
+   */
+  async #trackMemoryUsage(result: AgentLoopResult): Promise<void> {
+    const config = this.#options.config;
+    if (!config.memory.enabled) return;
+    if (this.#options.memoryStores === undefined) return;
+    const injected = this.#options.injectedMemories;
+    if (injected === undefined || injected.length === 0) return;
+    try {
+      const detections = detectAdoption(injected, this.#context.messages);
+      const adoptedIds: string[] = [];
+      for (const record of injected) {
+        const isAdopted =
+          detections.find((entry) => entry.memoryId === record.id)?.adopted ?? false;
+        if (isAdopted) adoptedIds.push(record.id);
+        const exposure = record.exposure + 1;
+        const adopted = record.adopted + (isAdopted ? 1 : 0);
+        const adoptedOk =
+          record.adoptedOk + (isAdopted && result.reason === 'stop' ? 1 : 0);
+        const adoptedBad =
+          record.adoptedBad +
+          (isAdopted && (result.reason === 'maxTurns' || result.reason === 'error') ? 1 : 0);
+        const shouldDeprecate = adopted >= 3 && adoptedBad / adopted > 0.5;
+        await patchMemoryRecord(this.#options.memoryStores, record.scope, record.id, {
+          exposure,
+          adopted,
+          adoptedOk,
+          adoptedBad,
+          ...(shouldDeprecate ? { status: 'deprecated' } : {}),
+        });
+      }
+      await this.#options.memoryUsageLog?.append({
+        timestamp: this.#now(),
+        sessionId: this.#options.sessionId ?? 'ephemeral',
+        injectedIds: injected.map((record) => record.id),
+        adoptedIds,
+        loopEndReason: result.reason,
+        turns: result.turns,
+      });
+    } catch {
+      // 采纳反馈是锦上添花；任何失败都不该影响已经产出的任务结果。
+    }
+  }
+
+  /**
+   * 任务级抽取，跟在压缩摘要同一套"失败降级"纪律下：任何未预料的失败都
+   * 不该反过来污染已经产出的 AgentLoopResult，所以整体包一层 try/catch，
+   * 即使 LlmMemoryExtractor 自己已经不抛（见 extract.ts 的文档），这里
+   * 仍然按"防御第二层"处理——未来换一个不遵守这条约定的 MemoryExtractor
+   * 实现时，这层兜底还在。
+   *
+   * 三道门禁，任一不满足就直接跳过，不排队不重试：
+   *   1. 没配 memoryStores（没地方写，等同于关闭）
+   *   2. loop 以 aborted 结束（用户主动取消，不产出任何教训）
+   *   3. GPU 忙或内存压力已经到压缩阈值（本地只有一块 GPU，这次任务的
+   *      推理请求不该为一次锦上添花的抽取让路）
+   */
+  async #extractMemory(result: AgentLoopResult, signal: AbortSignal): Promise<void> {
+    const config = this.#options.config;
+    if (!config.memory.enabled) return;
+    if (this.#options.memoryStores === undefined) return;
+    if (result.reason === 'aborted') return;
+    try {
+      const snapshot = await this.#resourceProbe.snapshot();
+      if (snapshot.gpuBusy || snapshot.memPressure >= config.context.memPressureThreshold) {
+        return;
+      }
+      const records = await this.#memoryExtractor().extract(
+        {
+          sourceSessionId: this.#options.sessionId ?? 'ephemeral',
+          projectKey: this.#options.projectKey ?? '',
+          messages: this.#context.messages,
+          loopEndReason: result.reason,
+          ...(this.#previousSummary === undefined
+            ? {}
+            : { previousSummary: this.#previousSummary }),
+          maxTrackedFiles: config.context.maxTrackedFiles,
+        },
+        signal,
+      );
+      for (const record of records) {
+        await writeMemoryRecord(this.#options.memoryStores, record);
+      }
+    } catch {
+      // 记忆抽取是锦上添花；任何失败都不该影响已经产出的任务结果。
+    }
+  }
+
+  #memoryExtractor(): MemoryExtractor {
+    if (this.#options.memoryExtractor !== undefined) return this.#options.memoryExtractor;
+    const config = this.#options.config;
+    return new LlmMemoryExtractor({
+      provider: this.#provider,
+      model: this.#options.model,
+      maxTokens: config.memory.extractMaxTokens,
+      timeoutMs: config.memory.extractTimeoutMs,
       notify: (message) => this.#emit({ type: 'notify', level: 'warn', message }),
       now: this.#now,
     });

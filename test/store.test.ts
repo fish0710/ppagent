@@ -229,6 +229,20 @@ describe('JSONL store', () => {
     );
     expect(jsonl.trim().split('\n')).toHaveLength(3);
   });
+
+  it('get() reads a single session and returns undefined for an unknown one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ppagent-store-'));
+    roots.push(root);
+    const store = new JsonlStore({ rootDirectory: root });
+    await store.create({ id: 'session/two', cwd: '/work', title: 'task' });
+    await store.touch('session/two', { memoryBlock: '<long-term-memory>...</long-term-memory>' });
+
+    expect(await store.get('session/two')).toMatchObject({
+      id: 'session/two',
+      memoryBlock: '<long-term-memory>...</long-term-memory>',
+    });
+    expect(await store.get('no-such-session')).toBeUndefined();
+  });
 });
 
 /**

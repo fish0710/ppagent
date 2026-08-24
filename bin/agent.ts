@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -38,7 +39,15 @@ import {
   StubAdmissionController,
   InteractivePermissionPolicy,
   createAgentTokenizerLoader,
+  deriveProjectKey,
+  JsonlMemoryStore,
+  JsonlMemoryUsageLog,
+  type MemoryUsageLog,
+  retrieveMemoryBlock,
+  type AgentConfig,
   type AgentConfigSource,
+  type MemoryStores,
+  type RenderedMemoryBlock,
 } from '../dist/agent/index.js';
 import {
   CliInteraction,
@@ -59,10 +68,12 @@ import {
 import type {
   CompactResult,
   Interaction,
+  MemoryRecord,
   Message,
   StoreRecord,
   ToolContext,
   SpanExporter,
+  TokenCounter,
 } from '../dist/core/types.js';
 import { readCustomSmokeEnvironment } from './smoke-env.js';
 
@@ -230,7 +241,14 @@ async function runAgent(args: AgentArgs): Promise<void> {
       timeoutMs: config.context.tokenizerTimeoutMs,
     }),
   });
-  const stored = await prepareSession(args, model);
+  const memorySetup = config.memory.enabled ? await createMemorySetup() : undefined;
+  const stored = await prepareSession(
+    args,
+    model,
+    config,
+    tokenCounterSelection.counter,
+    memorySetup,
+  );
   const exporters: SpanExporter[] = [];
   if (args.trace) exporters.push(new ConsoleSpanExporter());
   if (config.telemetry.laminarApiKey !== undefined) {
@@ -316,8 +334,43 @@ async function runAgent(args: AgentArgs): Promise<void> {
       ...(spanExporter === undefined
         ? {}
         : { telemetry: { exporter: spanExporter } }),
+      ...(memorySetup === undefined
+        ? {}
+        : {
+            memoryStores: memorySetup.stores,
+            projectKey: memorySetup.projectKey,
+            memoryUsageLog: memorySetup.usageLog,
+          }),
+      ...(stored.injectedMemories === undefined
+        ? {}
+        : { injectedMemories: stored.injectedMemories }),
+      ...(args.session === undefined ? {} : { sessionId: args.session }),
     });
   }
+}
+
+interface MemorySetup {
+  stores: MemoryStores;
+  projectKey: string;
+  usageLog: MemoryUsageLog;
+}
+
+/**
+ * 只在 memory.enabled 时构造：project store 挂 cwd（同 JsonlStore 的
+ * .ppagent/sessions 先例），user store 挂 homedir，各自独立目录。usage.jsonl
+ * 落在 project 目录——会话本身就是按 cwd 归属的，见 usage-log.ts 的文档。
+ */
+async function createMemorySetup(): Promise<MemorySetup> {
+  const cwd = process.cwd();
+  const projectMemoryDir = join(cwd, '.ppagent', 'memory');
+  return {
+    projectKey: await deriveProjectKey(cwd),
+    stores: {
+      project: new JsonlMemoryStore({ rootDirectory: projectMemoryDir }),
+      user: new JsonlMemoryStore({ rootDirectory: join(homedir(), '.ppagent', 'memory') }),
+    },
+    usageLog: new JsonlMemoryUsageLog({ rootDirectory: projectMemoryDir }),
+  };
 }
 
 interface PreparedSession {
@@ -325,14 +378,33 @@ interface PreparedSession {
   previousSummary?: Message;
   previousCarried?: readonly Message[];
   persistence?: AgentLoopPersistence;
+  /**
+   * 本次会话真正注入 systemPrompt 的记忆记录（供 session.ts 做曝光计数/
+   * 采纳检测）。--resume 路径下始终为空——原始注入的具体是哪几条记忆没有
+   * 持久化（只存了渲染后的文本），resume 出的会话不参与曝光/采纳反馈，
+   * 这是 v1 接受的已知缺口，不是遗漏。
+   */
+  injectedMemories?: MemoryRecord[];
 }
 
 async function prepareSession(
   args: AgentArgs,
   model: ModelRef,
+  config: AgentConfig,
+  tokenCounter: TokenCounter,
+  memorySetup: MemorySetup | undefined,
 ): Promise<PreparedSession> {
   if (args.session === undefined) {
-    return { context: { messages: [] } };
+    // 没有 --session 就没有持久化，也就没有"恢复"可言：每次都可以放心重新检索。
+    const memory =
+      memorySetup === undefined
+        ? { text: '', included: [] }
+        : await retrieveFreshMemoryBlock(args, memorySetup, config, tokenCounter);
+    return {
+      context:
+        memory.text.length === 0 ? { messages: [] } : { messages: [], systemPrompt: memory.text },
+      ...(memory.included.length === 0 ? {} : { injectedMemories: memory.included }),
+    };
   }
   const sessionId = args.session;
 
@@ -340,14 +412,29 @@ async function prepareSession(
     rootDirectory: join(process.cwd(), '.ppagent', 'sessions'),
   });
   let records: StoreRecord[] = [];
+  let memoryBlock = '';
+  let injectedMemories: MemoryRecord[] = [];
   if (args.resume) {
     records = await store.load(sessionId);
+    // --resume：原样复现本次会话最初注入的记忆块，不重新检索。检索输入
+    // （query、记忆库当前状态）会随时间变化，重新检索会让 resume 出的
+    // systemPrompt 与原会话不同，前缀缓存从第 0 个 token 起作废。
+    // injectedMemories 保持空——原始选中的具体记录没有持久化，见
+    // PreparedSession.injectedMemories 的文档。
+    memoryBlock = (await store.get(sessionId))?.memoryBlock ?? '';
   } else {
+    const memory =
+      memorySetup === undefined
+        ? { text: '', included: [] }
+        : await retrieveFreshMemoryBlock(args, memorySetup, config, tokenCounter);
+    memoryBlock = memory.text;
+    injectedMemories = memory.included;
     await store.create({
       id: sessionId,
       cwd: process.cwd(),
       model: `${model.provider}/${model.id}`,
       title: args.prompt.slice(0, 80),
+      ...(memoryBlock.length === 0 ? {} : { memoryBlock }),
     });
   }
 
@@ -410,11 +497,36 @@ async function prepareSession(
     },
   };
   return {
-    context: { messages },
+    context: {
+      messages,
+      ...(memoryBlock.length === 0 ? {} : { systemPrompt: memoryBlock }),
+    },
     ...(previous === undefined ? {} : { previousSummary: previous }),
     ...(previousCarried === undefined ? {} : { previousCarried }),
+    ...(injectedMemories.length === 0 ? {} : { injectedMemories }),
     persistence,
   };
+}
+
+/**
+ * 会话启动时跑一次急切检索。stores/projectKey 由 createMemorySetup 算过
+ * 一次后传进来复用——extraction 那端（session.ts 的 memoryStores/projectKey
+ * 选项）也用同一份，避免重复起 git 子进程、重复构造 store 实例。
+ * 只在这里调一次——调用方（prepareSession）保证非 resume 路径才会走到这，
+ * 会话内不会再变。
+ */
+async function retrieveFreshMemoryBlock(
+  args: AgentArgs,
+  memorySetup: MemorySetup,
+  config: AgentConfig,
+  tokenCounter: TokenCounter,
+): Promise<RenderedMemoryBlock> {
+  return retrieveMemoryBlock(
+    memorySetup.stores,
+    { text: args.prompt, projectKey: memorySetup.projectKey },
+    config.memory,
+    tokenCounter,
+  );
 }
 
 async function runTool(args: ToolArgs): Promise<void> {

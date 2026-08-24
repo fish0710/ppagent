@@ -309,6 +309,41 @@ describe('agent config', () => {
     ).toBe(0);
   });
 
+  it('defaults memory to disabled, and merges file/env/CLI overrides in the usual precedence', () => {
+    expect(mergeAgentConfig().memory).toMatchObject({
+      enabled: false,
+      searchTool: false,
+    });
+    const merged = mergeAgentConfig(
+      { memory: { enabled: true, injectMaxTokens: 200 } },
+      configFromEnvironment({ PPAGENT_MEMORY_SLOT_PROJECT: '5' }),
+      { memory: { minScore: 0.9 } },
+    );
+    expect(merged.memory).toMatchObject({
+      enabled: true,
+      injectMaxTokens: 200,
+      slotProject: 5,
+      minScore: 0.9,
+    });
+  });
+
+  it('validates memory config fields', () => {
+    expect(() => mergeAgentConfig({ memory: { enabled: 'yes' as never } })).toThrow(
+      'memory.enabled must be a boolean',
+    );
+    expect(() => mergeAgentConfig({ memory: { injectMaxTokens: 0 } })).toThrow(
+      'memory.injectMaxTokens must be a positive integer',
+    );
+    expect(() => mergeAgentConfig({ memory: { minScore: -1 } })).toThrow(
+      'memory.minScore must be a non-negative number',
+    );
+    expect(() => mergeAgentConfig({ memory: { slotProject: -1 } })).toThrow(
+      'memory.slotProject must be a non-negative integer',
+    );
+    // slotProject/slotUser/slotExplore: 0 must be accepted (disables that slot).
+    expect(mergeAgentConfig({ memory: { slotExplore: 0 } }).memory.slotExplore).toBe(0);
+  });
+
   it('keeps PPAGENT_REQUEST_TIMEOUT_MS independent of the other *_TIMEOUT_MS env vars', () => {
     const source = configFromEnvironment({
       PPAGENT_REQUEST_TIMEOUT_MS: '5000',

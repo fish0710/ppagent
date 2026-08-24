@@ -789,6 +789,13 @@ export interface SessionMeta {
   model?: string;
   /** 首条用户消息的摘要，用于 session 列表展示 */
   title?: string;
+  /**
+   * 本次会话注入 systemPrompt 的记忆块渲染结果（render.ts 的输出原文）。
+   * --resume 时原样复现而不重新检索 —— 检索输入（首条 query、记忆库当前
+   * 状态）会随时间变化，重新检索会让 resume 出的 systemPrompt 与原会话不同，
+   * 前缀缓存从第 0 个 token 起作废。老记录没有这个字段时按"未注入"处理。
+   */
+  memoryBlock?: string;
 }
 
 export interface Store {
@@ -797,6 +804,8 @@ export interface Store {
   /** 按 seq 升序返回全部记录，由调用方回放重建 */
   load(id: SessionId): Promise<StoreRecord[]>;
   list(): Promise<SessionMeta[]>;
+  /** 读取单个 session 的元信息；不存在时返回 undefined，不抛错。 */
+  get(id: SessionId): Promise<SessionMeta | undefined>;
   touch(id: SessionId, patch: Partial<SessionMeta>): Promise<void>;
 }
 
@@ -991,4 +1000,102 @@ export interface TelemetryConfig {
   enabled: boolean;
   /** 0–1，1 表示全采样 */
   sampleRate: number;
+}
+
+export interface MemoryConfig {
+  enabled: boolean;
+  /** 注入 systemPrompt 的记忆块 token 预算上限 */
+  injectMaxTokens: number;
+  /**
+   * 槽内最低相关性分数，未达阈值该槽位注入 0 条，不用低分记忆凑数。
+   * 单位是 core/memory/rank.ts 的原始 BM25 分数，量纲随语料变化，靠经验调。
+   * 见 M12 记忆检索：注入劣质记忆的代价高于不注入。
+   */
+  minScore: number;
+  /** project scope 槽位大小；防止 project 记忆数量把 user 记忆挤没。 */
+  slotProject: number;
+  slotUser: number;
+  /** 探索槽：按曝光次数最低（而非分数）挑选，跳过 minScore 门槛 —— 保证低
+   * 曝光的新记忆有机会被验证，见 6.3 状态机的宽限期/探索槽配套设计。 */
+  slotExplore: number;
+  /** 抽取调用的 maxTokens，同摘要路径的 summaryMaxTokens 是两个独立预算 */
+  extractMaxTokens: number;
+  /** 抽取调用超时，独立于整轮超时 */
+  extractTimeoutMs: number;
+  /**
+   * 是否注册 memory_search 工具。工具定义会被 chat template 渲染进 system
+   * 段，每次请求都计费；默认关闭，先证明急切检索（启动时注入）不够用。
+   */
+  searchTool: boolean;
+}
+
+// ============================================================================
+// 14. 长期记忆
+//
+// 与 Message 的区别是 M12 立项前就已经写进错题本 1.3 的四条轴线，这里的形状
+// 直接对应它们：
+//   scope      —— 跨 session（Message 只在单 session 内）
+//   put/patch  —— 可更新可删除（Message 是 append-only）
+//   status     —— 必须存活（Message 会被 compact 折叠掉）
+//   MemoryStore.all() 由检索方按需过滤 —— 按需检索注入，不像 Message 全量发送
+//
+// 不复用 StoreRecord：core/store/jsonl.ts 的 parseRecord 对未知 kind 硬抛，
+// 加第三个 arm 会让旧二进制读到新写入的 session 文件时整个 session 报废。
+// 记忆改用独立的 MemoryStore + 独立的磁盘目录（agent/memory/store.ts）。
+//
+// scope 只有 project | user 两级，没有 opus5 设计里的 global —— 单用户单机
+// 场景下"跨用户团队规范"没有语义对象。也没有 confidence / parentId /
+// mergedFrom / embedding 等字段：错题本 1.3 的教训是"不在路线图上的东西不要
+// 提前定类型"，晋升/合并流水线真的要做时，这些字段该长什么样多半跟现在猜的
+// 不一样，届时再加。
+// ============================================================================
+
+/**
+ * project：绑定 projectKey（git remote 或 cwd realpath），写入封顶默认落这里。
+ * user：跨项目的个人偏好，只有用户第一人称表达的偏好才升到这一级 —— 不让
+ * 模型自己判定 scope，写入侧强制封顶（见 agent/memory/extract.ts）。
+ */
+export type MemoryScope = 'project' | 'user';
+
+/** 抽取来源分类，不是失效方式分类；四类都用同一套 exposure/adopted 反馈处理。 */
+export type MemoryKind = 'fact' | 'convention' | 'decision' | 'pitfall';
+
+/**
+ * active：参与检索。deprecated：不参与检索但不物理删除 —— 它是评估抽取器
+ * 质量的负样本。物理删除只在用户显式要求时发生。
+ */
+export type MemoryStatus = 'active' | 'deprecated';
+
+export interface MemoryRecord {
+  id: string;
+  scope: MemoryScope;
+  kind: MemoryKind;
+  /** 一条记忆一件事；标识符/路径/命令原样保留，不转述。 */
+  text: string;
+  /** scope === 'project' 时必须有值；'user' 时不适用。 */
+  projectKey?: string;
+  sourceSessionId: SessionId;
+  createdAt: Millis;
+  updatedAt: Millis;
+  status: MemoryStatus;
+  /** 被检索命中并注入 systemPrompt 的次数 */
+  exposure: number;
+  /** 注入后被判定为"用到了"的次数（见 core/memory/adopt.ts 的确定性检测） */
+  adopted: number;
+  /** adopted 中，所属会话以 stop 结束的次数 */
+  adoptedOk: number;
+  /** adopted 中，所属会话以 maxTurns/error 结束的次数 —— 记忆可能在主动误导 */
+  adoptedBad: number;
+}
+
+/**
+ * 可更新可删除，与 append-only 的 Store 语义不同（错题本 1.3）。
+ * 不分页、不做服务端过滤：v1 记忆量在数百条级别，检索侧一次性加载后在内存
+ * 中排序即可；量级涨上去之后再考虑索引化，接口不必现在就为此让步。
+ */
+export interface MemoryStore {
+  put(record: MemoryRecord): Promise<void>;
+  all(): Promise<MemoryRecord[]>;
+  patch(id: string, patch: Partial<MemoryRecord>): Promise<void>;
+  remove(id: string): Promise<void>;
 }

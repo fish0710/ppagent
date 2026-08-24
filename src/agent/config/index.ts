@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import type {
   ContextConfig,
   LoopConfig,
+  MemoryConfig,
   ModelEffort,
   ToolsConfig,
 } from '../../core/types.js';
@@ -75,6 +76,7 @@ export interface AgentConfig {
   sandbox: AgentSandboxConfig;
   resource: AgentResourceConfig;
   telemetry: AgentTelemetryConfig;
+  memory: MemoryConfig;
 }
 
 export interface AgentConfigSource {
@@ -85,6 +87,7 @@ export interface AgentConfigSource {
   sandbox?: Partial<AgentSandboxConfig>;
   resource?: Partial<AgentResourceConfig>;
   telemetry?: Partial<AgentTelemetryConfig>;
+  memory?: Partial<MemoryConfig>;
 }
 
 export interface LoadAgentConfigOptions {
@@ -138,6 +141,20 @@ const DEFAULT_CONFIG: AgentConfig = {
   telemetry: {
     laminarEndpoint: 'https://api.lmnr.ai',
     serviceName: 'ppagent',
+  },
+  memory: {
+    // 默认关闭：基线臂就是今天的行为，逐字节相同，能做干净的 ON/OFF 对照。
+    enabled: false,
+    injectMaxTokens: 400,
+    minScore: 0.5,
+    slotProject: 2,
+    slotUser: 1,
+    slotExplore: 1,
+    extractMaxTokens: 512,
+    extractTimeoutMs: 60_000,
+    // 工具定义会被 chat template 渲染进 system 段，每次请求都计费；先证明
+    // 急切检索（启动时注入）不够用，再考虑打开惰性检索。
+    searchTool: false,
   },
 };
 
@@ -195,6 +212,7 @@ export async function readAgentConfigFile(
     'sandbox',
     'resource',
     'telemetry',
+    'memory',
   ] as const) {
     const candidate = value[section];
     if (candidate !== undefined && !isRecord(candidate)) {
@@ -314,6 +332,17 @@ export function configFromEnvironment(
     laminarEndpoint: nonEmpty(env['PPAGENT_LAMINAR_ENDPOINT']),
     serviceName: nonEmpty(env['PPAGENT_TELEMETRY_SERVICE_NAME']),
   });
+  const memory = compactObject<Partial<MemoryConfig>>({
+    enabled: envBoolean(env, 'PPAGENT_MEMORY_ENABLED'),
+    injectMaxTokens: envNumber(env, 'PPAGENT_MEMORY_INJECT_MAX_TOKENS'),
+    minScore: envNumber(env, 'PPAGENT_MEMORY_MIN_SCORE'),
+    slotProject: envNumber(env, 'PPAGENT_MEMORY_SLOT_PROJECT'),
+    slotUser: envNumber(env, 'PPAGENT_MEMORY_SLOT_USER'),
+    slotExplore: envNumber(env, 'PPAGENT_MEMORY_SLOT_EXPLORE'),
+    extractMaxTokens: envNumber(env, 'PPAGENT_MEMORY_EXTRACT_MAX_TOKENS'),
+    extractTimeoutMs: envNumber(env, 'PPAGENT_MEMORY_EXTRACT_TIMEOUT_MS'),
+    searchTool: envBoolean(env, 'PPAGENT_MEMORY_SEARCH_TOOL'),
+  });
   return {
     provider,
     ...(Object.keys(loop).length === 0 ? {} : { loop }),
@@ -322,6 +351,7 @@ export function configFromEnvironment(
     ...(Object.keys(sandbox).length === 0 ? {} : { sandbox }),
     ...(Object.keys(resource).length === 0 ? {} : { resource }),
     ...(Object.keys(telemetry).length === 0 ? {} : { telemetry }),
+    ...(Object.keys(memory).length === 0 ? {} : { memory }),
   };
 }
 
@@ -344,6 +374,7 @@ export function mergeAgentConfig(
     Object.assign(merged.sandbox, compactObject(source.sandbox ?? {}));
     Object.assign(merged.resource, compactObject(source.resource ?? {}));
     Object.assign(merged.telemetry, compactObject(source.telemetry ?? {}));
+    Object.assign(merged.memory, compactObject(source.memory ?? {}));
   }
   validateConfig(merged);
   return structuredClone(merged);
@@ -429,6 +460,21 @@ function validateConfig(config: AgentConfig): void {
     config.context.tokenizerTimeoutMs,
     'context.tokenizerTimeoutMs',
   );
+  if (typeof config.memory.enabled !== 'boolean') {
+    throw new Error('memory.enabled must be a boolean');
+  }
+  positiveInteger(config.memory.injectMaxTokens, 'memory.injectMaxTokens');
+  if (!Number.isFinite(config.memory.minScore) || config.memory.minScore < 0) {
+    throw new Error('memory.minScore must be a non-negative number');
+  }
+  nonNegativeInteger(config.memory.slotProject, 'memory.slotProject');
+  nonNegativeInteger(config.memory.slotUser, 'memory.slotUser');
+  nonNegativeInteger(config.memory.slotExplore, 'memory.slotExplore');
+  positiveInteger(config.memory.extractMaxTokens, 'memory.extractMaxTokens');
+  positiveInteger(config.memory.extractTimeoutMs, 'memory.extractTimeoutMs');
+  if (typeof config.memory.searchTool !== 'boolean') {
+    throw new Error('memory.searchTool must be a boolean');
+  }
 }
 
 function providerApiKey(

@@ -103,6 +103,17 @@ export class JsonlStore implements Store {
     return metas.sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
+  async get(id: SessionId): Promise<SessionMeta | undefined> {
+    validateSessionId(id);
+    await this.#queues.get(id);
+    try {
+      return parseMeta(await readFile(this.#metaPath(id), 'utf8'));
+    } catch (error) {
+      if (hasCode(error, 'ENOENT')) return undefined;
+      throw error;
+    }
+  }
+
   async touch(id: SessionId, patch: Partial<SessionMeta>): Promise<void> {
     validateSessionId(id);
     await this.#enqueue(id, () => this.#updateMeta(id, patch));
