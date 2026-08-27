@@ -926,11 +926,17 @@ function recordingProvider(
   };
 }
 
-function interaction(confirm: Interaction['confirm']): Interaction {
+/**
+ * InteractivePermissionPolicy 现在走 select()，不再走 confirm()；这个 helper
+ * 接受一个"confirm 形状"的 mock（沿用既有测试写法 async () => boolean），
+ * 内部转发到 select()，这样调用方原有的 vi.fn 断言（toHaveBeenCalledOnce 等）
+ * 依然生效。
+ */
+function interaction(confirm: (req: { message: string; detail?: string }) => Promise<boolean>): Interaction {
   return {
     confirm,
     ask: async () => null,
-    select: async () => null,
+    select: async (req) => ((await confirm(req)) ? 'allow' : 'deny'),
     notify: () => undefined,
   };
 }

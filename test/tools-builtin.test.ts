@@ -121,6 +121,56 @@ describe('built-in tools', () => {
     }
   });
 
+  it('reports display payloads for write, edit, read and bash', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'ppagent-tools-'));
+    const sandbox = new PassthroughSandbox();
+    const ctx = toolContext(directory);
+
+    const write = await runWithDisplay(
+      'write',
+      { path: 'note.txt', content: 'a\nb\nc' },
+      ctx,
+      sandbox,
+    );
+    expect(write.display).toEqual({ kind: 'write', path: join(directory, 'note.txt'), lines: 3, bytes: 5 });
+
+    const edit = await runWithDisplay(
+      'edit',
+      { path: 'note.txt', oldText: 'b', newText: 'bb' },
+      ctx,
+      sandbox,
+    );
+    expect(edit.display).toMatchObject({ kind: 'diff', path: join(directory, 'note.txt'), added: 1, removed: 1 });
+
+    const read = await runWithDisplay('read', { path: 'note.txt' }, ctx, sandbox);
+    expect(read.display).toEqual({
+      kind: 'read',
+      path: join(directory, 'note.txt'),
+      lines: 3,
+      totalLines: 3,
+    });
+
+    const readSlice = await runWithDisplay(
+      'read',
+      { path: 'note.txt', offset: 2, limit: 1 },
+      ctx,
+      sandbox,
+    );
+    expect(readSlice.display).toEqual({
+      kind: 'read',
+      path: join(directory, 'note.txt'),
+      lines: 1,
+      totalLines: 3,
+      offset: 2,
+    });
+
+    const bashOk = await runWithDisplay('bash', { cmd: "printf 'x\\ny\\n'" }, ctx, sandbox);
+    expect(bashOk.display).toEqual({ kind: 'bash', exitCode: 0, stdoutLines: 2, stderrLines: 0 });
+
+    const bashFail = await runWithDisplay('bash', { cmd: "printf 'e\\n' >&2; exit 2" }, ctx, sandbox);
+    expect(bashFail.display).toEqual({ kind: 'bash', exitCode: 2, stdoutLines: 0, stderrLines: 1 });
+  });
+
   it('returns a sandbox denial without touching the filesystem', async () => {
     directory = await mkdtemp(join(tmpdir(), 'ppagent-tools-'));
     const result = await run(
@@ -145,6 +195,27 @@ describe('built-in tools', () => {
 });
 
 async function run(
+  name: string,
+  args: unknown,
+  ctx: ToolContext,
+  sandbox: PassthroughSandbox,
+  toolTimeoutMs = 2_000,
+) {
+  const outcome = await executeToolCall(
+    createBuiltinToolRegistry(),
+    { type: 'toolCall', id: `call-${name}`, name, arguments: args },
+    ctx,
+    {
+      admission: new StubAdmissionController(),
+      permissions: new StubPermissionPolicy(),
+      sandbox,
+    },
+    { maxResultChars: 10_000, toolTimeoutMs },
+  );
+  return outcome.message;
+}
+
+async function runWithDisplay(
   name: string,
   args: unknown,
   ctx: ToolContext,

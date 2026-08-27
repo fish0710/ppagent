@@ -4,6 +4,8 @@ import type {
   UIEvent,
   Usage,
 } from '../../core/types.js';
+import type { BlockId, TranscriptBlock, TranscriptBlockBody } from './blocks.js';
+import { describeTool, sanitizeStreamingText, sanitizeToolDisplay, segmentMarkdown, visibleCharacterCount } from './format.js';
 
 export type TuiPhase =
   | 'idle'
@@ -22,14 +24,27 @@ export interface TuiToolActivity {
   startedAtMs: number;
 }
 
+export interface PendingPermission {
+  toolName: string;
+  summary: string;
+  detail?: string;
+  sandboxReason?: string;
+  startedAtMs: number;
+}
+
+const ZERO_USAGE: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
 /**
  * 仅保存渲染所需的派生状态，不复制 Context、消息或 loop 状态。
- * transcript 一旦追加便不修改；pendingText 是唯一允许原地重画的文本。
+ * blocks 一旦提交便不修改；pendingText/pendingThinking 是唯一允许原地重画的文本。
  */
 export interface TuiState {
   phase: TuiPhase;
-  transcript: readonly string[];
+  blocks: readonly TranscriptBlock[];
+  nextBlockId: BlockId;
   pendingText: string;
+  pendingThinking: string;
+  pendingPermission?: PendingPermission;
   turn: number;
   turnStartedAtMs?: number;
   decodeStartedAtMs?: number;
@@ -41,6 +56,8 @@ export interface TuiState {
   activeTools: Readonly<Record<string, TuiToolActivity>>;
   phaseBeforeConfirmation?: TuiPhase;
   lastUsage?: Usage;
+  /** 累计到目前为止的 usage；供 /cost 这类只读展示用。 */
+  totalUsage: Usage;
 }
 
 /** prompt_submitted 是 UI 输入，不是伪造的 Agent UIEvent。 */
@@ -51,11 +68,14 @@ export type TuiAction =
 export function createInitialTuiState(): TuiState {
   return {
     phase: 'idle',
-    transcript: [],
+    blocks: [],
+    nextBlockId: 0,
     pendingText: '',
+    pendingThinking: '',
     turn: 0,
     decodedCharacters: 0,
     activeTools: {},
+    totalUsage: { ...ZERO_USAGE },
   };
 }
 
@@ -67,10 +87,13 @@ export function reduceTuiState(
 ): TuiState {
   switch (action.type) {
     case 'prompt_submitted':
-      return appendTranscript(state, promptLines(action.prompt));
+      return appendBlock(commitPending(state), {
+        kind: 'user',
+        text: sanitizeStreamingText(action.prompt),
+      });
     case 'turn_start':
       return {
-        ...state,
+        ...commitPending(state),
         phase: 'prefill',
         turn: action.turn,
         turnStartedAtMs: nowMs,
@@ -84,23 +107,34 @@ export function reduceTuiState(
           : { contextWindow: action.contextWindow }),
       };
     case 'text_delta': {
-      const streamed = appendStreamText(state, action.delta);
+      const committedThinking = commitThinking(state);
+      const combined = `${committedThinking.pendingText}${sanitizeStreamingText(action.delta)}`;
+      const { segments, rest } = segmentMarkdown(combined);
+      const withSegments = appendBlocks(
+        committedThinking,
+        segments.map((text): TranscriptBlockBody => ({ kind: 'assistant', text })),
+      );
       return {
-        ...streamed,
+        ...withSegments,
+        pendingText: rest,
         phase: 'decode',
-        ...(state.decodeStartedAtMs === undefined
-          ? { decodeStartedAtMs: nowMs }
-          : {}),
+        ...(state.decodeStartedAtMs === undefined ? { decodeStartedAtMs: nowMs } : {}),
         decodedCharacters:
           state.decodedCharacters + visibleCharacterCount(action.delta),
       };
     }
     case 'thinking_delta':
-      // 思考内容不进入 transcript；prefill 仍以首个用户可见文本为边界。
-      return state;
-    case 'tool_start':
       return {
         ...state,
+        pendingThinking: `${state.pendingThinking}${sanitizeStreamingText(action.delta)}`,
+        phase: state.phase === 'tool_running' ? state.phase : 'decode',
+        ...(state.decodeStartedAtMs === undefined ? { decodeStartedAtMs: nowMs } : {}),
+        decodedCharacters:
+          state.decodedCharacters + visibleCharacterCount(action.delta),
+      };
+    case 'tool_start':
+      return {
+        ...commitPending(state),
         phase: 'tool_running',
         activeTools: {
           ...state.activeTools,
@@ -113,70 +147,99 @@ export function reduceTuiState(
         },
       };
     case 'tool_end': {
-      const activity = state.activeTools[action.id];
-      const activeTools = { ...state.activeTools };
+      const committed = commitPending(state);
+      const activity = committed.activeTools[action.id];
+      const activeTools = { ...committed.activeTools };
       delete activeTools[action.id];
-      const summary = activity?.summary ?? action.name;
-      const preview = oneLine(action.preview);
-      const line = `${action.isError ? '⊘' : '⏺'} ${summary} ${formatDuration(
-        action.durationMs,
-      )}${action.isError && preview.length > 0 ? ` — ${preview}` : ''}`;
-      return appendTranscript(
+      return appendBlock(
         {
-          ...state,
+          ...committed,
           phase: Object.keys(activeTools).length > 0 ? 'tool_running' : 'idle',
           activeTools,
         },
-        [line],
+        {
+          kind: 'tool',
+          toolId: action.id,
+          name: action.name,
+          summary: activity?.summary ?? describeTool(action.name, undefined),
+          isError: action.isError,
+          durationMs: action.durationMs,
+          preview: action.preview,
+          ...(action.display === undefined
+            ? {}
+            : { display: sanitizeToolDisplay(action.display) }),
+        },
       );
     }
     case 'permission_request': {
       const committed = commitPending(state);
-      const lines = [`? ${oneLine(action.req.summary)}`];
-      if (action.req.sandboxReason !== undefined) {
-        lines.push(`  沙箱：${oneLine(action.req.sandboxReason)}`);
-      }
-      return appendTranscript(
-        {
-          ...committed,
-          phase: 'confirming',
-          phaseBeforeConfirmation: committed.phase,
+      return {
+        ...committed,
+        phase: 'confirming',
+        phaseBeforeConfirmation: committed.phase,
+        pendingPermission: {
+          toolName: action.req.toolName,
+          summary: action.req.summary,
+          startedAtMs: nowMs,
+          ...(action.req.detail === undefined ? {} : { detail: action.req.detail }),
+          ...(action.req.sandboxReason === undefined
+            ? {}
+            : { sandboxReason: action.req.sandboxReason }),
         },
-        lines,
-      );
+      };
     }
     case 'permission_resolved':
       return resolvePermission(state, action.decision);
     case 'notify':
-      return appendTranscript(state, [
-        `${notificationIcon(action.level)} ${oneLine(action.message)}`,
-      ]);
+      return appendBlock(commitPending(state), {
+        kind: 'notice',
+        level: action.level,
+        text: sanitizeStreamingText(action.message),
+      });
     case 'admission_denied':
-      return appendTranscript(state, [formatAdmissionDenied(action)]);
+      return appendBlock(commitPending(state), {
+        kind: 'admissionDenied',
+        reason: sanitizeStreamingText(action.reason),
+        retryAfterMs: action.retryAfterMs,
+      });
     case 'compact_start':
       return {
-        ...state,
+        ...commitPending(state),
         phase: 'compacting',
         compactStartedAtMs: nowMs,
         phaseBeforeCompaction: state.phase,
       };
     case 'compact_skipped':
-      return appendTranscript(endCompaction(state), [
-        `⟳ 未压缩：${oneLine(action.reason)}`,
-      ]);
+      return appendBlock(endCompaction(commitPending(state)), {
+        kind: 'compaction',
+        variant: 'skipped',
+        trigger: action.trigger,
+        reason: sanitizeStreamingText(action.reason),
+      });
     case 'compacted':
-      return appendTranscript(
-        { ...endCompaction(state), contextTokens: action.tokensAfter },
-        [formatCompaction(action)],
+      return appendBlock(
+        { ...endCompaction(commitPending(state)), contextTokens: action.tokensAfter },
+        {
+          kind: 'compaction',
+          variant: action.kind === 'prune' ? 'prune' : 'summarize',
+          trigger: action.trigger,
+          tokensBefore: action.tokensBefore,
+          tokensAfter: action.tokensAfter,
+          prunedCount: action.prunedCount,
+          ...(action.strategy === undefined ? {} : { strategy: action.strategy }),
+          ...(action.resourceSource === undefined
+            ? {}
+            : { resourceSource: action.resourceSource }),
+        },
       );
     case 'turn_end':
       return finishTurn(state, action, nowMs);
     case 'loop_end':
       return finishLoop(state, action.reason);
     case 'error':
-      return appendTranscript(
+      return appendBlock(
         { ...commitPending(state), phase: 'error' },
-        [`⊘ ${oneLine(action.message)}`],
+        { kind: 'error', text: sanitizeStreamingText(action.message) },
       );
   }
 }
@@ -198,16 +261,21 @@ function resolvePermission(
   state: TuiState,
   decision: PermissionDecision,
 ): TuiState {
-  const {
-    phaseBeforeConfirmation,
-    ...withoutConfirmationPhase
-  } = state;
-  return appendTranscript(
+  const { phaseBeforeConfirmation, pendingPermission, ...rest } = state;
+  const summary = pendingPermission?.summary ?? '';
+  return appendBlock(
+    { ...rest, phase: phaseBeforeConfirmation ?? inferredActivePhase(state) },
     {
-      ...withoutConfirmationPhase,
-      phase: phaseBeforeConfirmation ?? inferredActivePhase(state),
+      kind: 'permission',
+      summary,
+      decision,
+      ...(pendingPermission?.detail === undefined
+        ? {}
+        : { detail: pendingPermission.detail }),
+      ...(pendingPermission?.sandboxReason === undefined
+        ? {}
+        : { sandboxReason: pendingPermission.sandboxReason }),
     },
-    [`  → ${permissionLabel(decision)}`],
   );
 }
 
@@ -217,24 +285,31 @@ function finishTurn(
   nowMs: number,
 ): TuiState {
   const committed = commitPending(state);
-  const lines: string[] = [];
-  if (committed.decodeStartedAtMs !== undefined && event.usage.output > 0) {
-    const seconds = Math.max((nowMs - committed.decodeStartedAtMs) / 1_000, 0.001);
-    const rate = event.usage.output / seconds;
-    const context = formatContext(event.usage.input, committed.contextWindow);
-    lines.push(`  ↳ ${formatRate(rate)} tok/s${context === '' ? '' : ` · ${context}`}`);
-  }
-  const { decodeStartedAtMs: _decodeStartedAtMs, ...withoutDecodeStart } = committed;
-  return appendTranscript(
-    {
-      ...withoutDecodeStart,
-      phase: 'idle',
-      lastUsage: event.usage,
-      contextTokens: event.usage.input,
-      decodedCharacters: 0,
-    },
-    lines,
-  );
+  const totalUsage: Usage = {
+    input: committed.totalUsage.input + event.usage.input,
+    output: committed.totalUsage.output + event.usage.output,
+    cacheRead: committed.totalUsage.cacheRead + event.usage.cacheRead,
+    cacheWrite: committed.totalUsage.cacheWrite + event.usage.cacheWrite,
+  };
+  const { decodeStartedAtMs, ...withoutDecodeStart } = committed;
+  const next: TuiState = {
+    ...withoutDecodeStart,
+    phase: 'idle',
+    lastUsage: event.usage,
+    contextTokens: event.usage.input,
+    decodedCharacters: 0,
+    totalUsage,
+  };
+  // 工具调用紧接着这轮结束；指标行会插在 assistant 文本和工具块中间，读起来是错的，
+  // 只在这一轮真正结束（不再继续调工具）时才提交。
+  if (event.stopReason === 'toolUse') return next;
+  return appendBlock(next, {
+    kind: 'metrics',
+    usage: event.usage,
+    ...(decodeStartedAtMs === undefined ? {} : { decodeMs: nowMs - decodeStartedAtMs }),
+    ...(committed.contextWindow === undefined ? {} : { contextWindow: committed.contextWindow }),
+    contextTokens: event.usage.input,
+  });
 }
 
 function finishLoop(
@@ -243,179 +318,53 @@ function finishLoop(
 ): TuiState {
   const committed = commitPending(state);
   const { phaseBeforeConfirmation: _confirmation, ...withoutConfirmation } = committed;
-  const lines =
-    reason === 'aborted'
-      ? ['⏹ 已取消']
-      : reason === 'maxTurns'
-        ? ['⊘ 已达到最大轮数']
-        : reason === 'error'
-          ? ['⊘ Agent 因错误停止']
-          : [];
-  return appendTranscript(
+  return appendBlock(
     { ...withoutConfirmation, phase: 'idle', activeTools: {} },
-    lines,
+    { kind: 'loopEnd', reason },
   );
 }
 
-function appendStreamText(state: TuiState, delta: string): TuiState {
-  const combined = `${state.pendingText}${sanitizeStreamingText(delta)}`;
-  const parts = combined.split('\n');
-  const pendingText = parts.pop() ?? '';
-  return appendTranscript({ ...state, pendingText }, parts);
+function commitThinking(state: TuiState): TuiState {
+  if (state.pendingThinking.length === 0) return state;
+  return appendBlock(
+    { ...state, pendingThinking: '' },
+    { kind: 'thinking', text: state.pendingThinking },
+  );
 }
 
+/** 提交 pendingThinking 和 pendingText（若有）；每个非流式事件处理前都要调用一次，
+ *  保证 blocks 数组里的顺序和事件到达顺序一致。空缓冲区时是纯粹的 no-op。 */
 function commitPending(state: TuiState): TuiState {
-  if (state.pendingText.length === 0) return state;
-  return appendTranscript({ ...state, pendingText: '' }, [state.pendingText]);
+  const withThinking = commitThinking(state);
+  if (withThinking.pendingText.length === 0) return withThinking;
+  // 强制 flush（没有更多流式内容跟上来了）；去掉尾随换行，和 segmentMarkdown
+  // 正常切出的段落保持同样的形状，避免渲染出多余的空行。
+  const text = withThinking.pendingText.replace(/\n+$/u, '');
+  return appendBlock(
+    { ...withThinking, pendingText: '' },
+    { kind: 'assistant', text },
+  );
 }
 
-function appendTranscript(state: TuiState, lines: readonly string[]): TuiState {
-  if (lines.length === 0) return state;
+function appendBlock(state: TuiState, body: TranscriptBlockBody): TuiState {
+  return appendBlocks(state, [body]);
+}
+
+function appendBlocks(state: TuiState, bodies: readonly TranscriptBlockBody[]): TuiState {
+  if (bodies.length === 0) return state;
+  let nextId = state.nextBlockId;
+  const newBlocks = bodies.map((body) => {
+    const block: TranscriptBlock = { id: nextId, ...body };
+    nextId += 1;
+    return block;
+  });
   return {
     ...state,
-    transcript: [...state.transcript, ...lines],
+    blocks: [...state.blocks, ...newBlocks],
+    nextBlockId: nextId,
   };
-}
-
-function promptLines(prompt: string): string[] {
-  const lines = sanitizeStreamingText(prompt).split('\n');
-  return lines.map((line, index) => `${index === 0 ? '> ' : '  '}${line}`);
 }
 
 function inferredActivePhase(state: TuiState): TuiPhase {
   return Object.keys(state.activeTools).length > 0 ? 'tool_running' : 'prefill';
-}
-
-function permissionLabel(decision: PermissionDecision): string {
-  switch (decision) {
-    case 'allow':
-      return '已允许';
-    case 'allowAlways':
-      return '已始终允许';
-    case 'deny':
-      return '已拒绝';
-  }
-}
-
-function notificationIcon(level: 'info' | 'warn' | 'error'): string {
-  return level === 'info' ? 'ℹ' : level === 'warn' ? '⚠' : '⊘';
-}
-
-function formatAdmissionDenied(event: Extract<UIEvent, { type: 'admission_denied' }>): string {
-  const retry =
-    event.retryAfterMs === null
-      ? ''
-      : `，建议 ${formatDuration(event.retryAfterMs)} 后重试`;
-  return `⊘ 子 agent 被拒：${oneLine(event.reason)}${retry}`;
-}
-
-function formatCompaction(event: Extract<UIEvent, { type: 'compacted' }>): string {
-  const trigger =
-    event.trigger === 'memory'
-      ? '内存压力'
-      : event.trigger === 'token'
-        ? '上下文阈值'
-        : '手动触发';
-  // 剪枝和摘要的信息损失不是一个量级，标签必须能区分：剪枝只降了老工具输出
-  // 的保真度，摘要则把那段历史整个换成了模型的转述。
-  const label = event.kind === 'prune' ? '剪枝' : '压缩';
-  const detail = [
-    trigger,
-    ...(event.strategy === undefined ? [] : [event.strategy]),
-    ...(event.kind === 'prune' ? [`${event.prunedCount} 条工具输出`] : []),
-    ...(event.resourceSource === undefined
-      ? []
-      : [resourceLabel(event.resourceSource)]),
-  ].join(' · ');
-  return `⟳ ${label} ${formatTokenCount(event.tokensBefore)}→${formatTokenCount(
-    event.tokensAfter,
-  )}（${detail}）`;
-}
-
-function resourceLabel(source: ResourceSnapshot['source']): string {
-  switch (source) {
-    case 'memory_pressure':
-      return 'memory_pressure';
-    case 'vm_stat':
-      return 'vm_stat';
-    case 'system':
-      return 'system';
-    case 'test':
-      return 'test probe';
-  }
-}
-
-export function describeTool(name: string, args: unknown): string {
-  if (isRecord(args)) {
-    if (name === 'bash' && typeof args['cmd'] === 'string') {
-      return `bash ${oneLine(args['cmd'])}`;
-    }
-    if (
-      (name === 'read' || name === 'write' || name === 'edit') &&
-      typeof args['path'] === 'string'
-    ) {
-      return `${name} ${oneLine(args['path'])}`;
-    }
-    if (name === 'spawn_subagent' && typeof args['task'] === 'string') {
-      return `子 agent ${oneLine(args['task'])}`;
-    }
-  }
-  return `${name} ${safeOneLineJson(args)}`.trimEnd();
-}
-
-export function formatTokenCount(value: number): string {
-  if (value >= 1_000_000) return `${trimFixed(value / 1_000_000)}m`;
-  if (value >= 1_000) return `${trimFixed(value / 1_000)}k`;
-  return String(Math.max(0, Math.round(value)));
-}
-
-export function formatDuration(durationMs: number): string {
-  if (durationMs < 1_000) return `${Math.max(0, Math.round(durationMs))}ms`;
-  return `${trimFixed(durationMs / 1_000)}s`;
-}
-
-export function formatRate(rate: number): string {
-  if (rate >= 1_000) return formatTokenCount(rate);
-  return rate >= 100 ? String(Math.round(rate)) : trimFixed(rate);
-}
-
-export function formatContext(
-  contextTokens: number | undefined,
-  contextWindow: number | undefined,
-): string {
-  if (contextTokens === undefined) return '';
-  return `上下文 ${formatTokenCount(contextTokens)}${
-    contextWindow === undefined ? '' : `/${formatTokenCount(contextWindow)}`
-  }`;
-}
-
-/** 删除能控制终端的字符；换行作为 transcript 的提交边界保留。 */
-export function sanitizeStreamingText(value: string): string {
-  return value
-    .replace(/\r\n?/gu, '\n')
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/gu, '');
-}
-
-function oneLine(value: string): string {
-  return sanitizeStreamingText(value).replace(/\s*\n\s*/gu, ' ↵ ').trim();
-}
-
-function safeOneLineJson(value: unknown): string {
-  try {
-    return oneLine(JSON.stringify(value));
-  } catch {
-    return '[unserializable arguments]';
-  }
-}
-
-function visibleCharacterCount(value: string): number {
-  return Array.from(sanitizeStreamingText(value).replace(/\n/gu, '')).length;
-}
-
-function trimFixed(value: number): string {
-  return value.toFixed(1).replace(/\.0$/u, '');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

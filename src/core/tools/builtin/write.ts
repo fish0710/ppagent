@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises';
-import type { Tool } from '../../types.js';
+import type { Tool, ToolOutput } from '../../types.js';
 import { textOutput } from '../execute.js';
-import { objectArgs, pathSandboxPreparation, stringArg } from './common.js';
+import { countLines, objectArgs, pathSandboxPreparation, stringArg } from './common.js';
 
 export const writeTool: Tool = {
   name: 'write',
@@ -27,6 +27,11 @@ export const writeTool: Tool = {
     const path = stringArg(args, 'path');
     const content = stringArg(args, 'content');
     await writeFile(path, content, { encoding: 'utf8', signal: ctx.signal });
-    return textOutput(`Wrote ${Buffer.byteLength(content, 'utf8')} bytes to ${path}`);
+    const bytes = Buffer.byteLength(content, 'utf8');
+    const output: ToolOutput = {
+      ...textOutput(`Wrote ${bytes} bytes to ${path}`),
+      display: { kind: 'write', path, lines: countLines(content), bytes },
+    };
+    return output;
   },
 };

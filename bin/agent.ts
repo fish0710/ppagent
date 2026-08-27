@@ -268,7 +268,20 @@ async function runAgent(args: AgentArgs): Promise<void> {
         ? exporters[0]
         : new CompositeSpanExporter(exporters);
   if (args.tui) {
-    const tui = new TuiApp();
+    const tui = new TuiApp({
+      info: {
+        version: pkg.version,
+        cwd: process.cwd(),
+        provider: model.provider,
+        model: model.id,
+        contextWindow: model.contextWindow,
+        tokenizer: tokenCounterSelection.counter.id,
+        tokenizerPrecision: tokenCounterSelection.counter.precision,
+        permissionMode: args.permissionMode,
+        sandbox: process.platform === 'darwin' ? 'macos' : 'passthrough',
+        ...(args.session === undefined ? {} : { sessionId: args.session }),
+      },
+    });
     if (tokenCounterSelection.warning !== undefined) {
       tui.renderer.render({
         type: 'notify',
@@ -539,7 +552,7 @@ async function runTool(args: ToolArgs): Promise<void> {
     interaction,
   };
   try {
-    const result = await executeToolCall(
+    const outcome = await executeToolCall(
       createBuiltinToolRegistry(),
       {
         type: 'toolCall',
@@ -558,8 +571,8 @@ async function runTool(args: ToolArgs): Promise<void> {
       },
       { maxResultChars: 8_000, toolTimeoutMs: 30_000 },
     );
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    if (result.isError) process.exitCode = 1;
+    process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
+    if (outcome.message.isError) process.exitCode = 1;
   } finally {
     if (interaction instanceof CliInteraction) interaction.close();
   }

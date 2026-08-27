@@ -18,6 +18,18 @@ export function stringArg(args: Record<string, unknown>, key: string): string {
   return value;
 }
 
+/** 用 indexOf 循环数行，避免在大文件上 split 出一个不必要的巨大数组。 */
+export function countLines(text: string): number {
+  if (text.length === 0) return 0;
+  let count = 1;
+  let idx = text.indexOf('\n');
+  while (idx !== -1) {
+    count += 1;
+    idx = text.indexOf('\n', idx + 1);
+  }
+  return text.endsWith('\n') ? count - 1 : count;
+}
+
 export function pathSandboxPreparation(
   value: unknown,
   ctx: ToolContext,

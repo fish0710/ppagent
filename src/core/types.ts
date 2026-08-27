@@ -359,12 +359,52 @@ export interface ToolOutput {
    * 例如 bash 起了一个常驻服务，内存压力会上升。
    */
   resourceHint?: ResourceHint;
+  /**
+   * 面向人的结构化展示载荷。**只走 UIEvent，不进 ToolResultMessage、不落盘、不进
+   * Context。** §11 已经确立 Span 与 UIEvent 是两个独立出口；把 diff 挂到会被
+   * compact/persist/resume 的 ToolResultMessage 上，是同一个错误的另一种形态。
+   */
+  display?: ToolDisplay;
 }
 
 export interface ResourceHint {
   spawnedProcesses?: number;
   memMB?: number;
 }
+
+export type ToolDisplay =
+  | {
+      kind: 'diff';
+      path: string;
+      hunks: DiffHunk[];
+      added: number;
+      removed: number;
+      /** 超出上限被丢弃的 DiffLine 条数。 */
+      truncatedLines?: number;
+    }
+  | { kind: 'write'; path: string; lines: number; bytes: number }
+  | {
+      kind: 'read';
+      path: string;
+      /** 本次实际返回的行数。 */
+      lines: number;
+      /** 文件总行数；与 lines 不等即说明取了片段。 */
+      totalLines: number;
+      offset?: number;
+    }
+  | { kind: 'bash'; exitCode: number; stdoutLines: number; stderrLines: number };
+
+export interface DiffHunk {
+  /** 1-based，在原文里的起始行号。 */
+  oldStart: number;
+  newStart: number;
+  lines: DiffLine[];
+}
+
+export type DiffLine =
+  | { op: 'context'; text: string }
+  | { op: 'add'; text: string }
+  | { op: 'remove'; text: string };
 
 // ============================================================================
 // 5. 沙箱
@@ -487,7 +527,7 @@ export interface Interaction {
   confirm(req: { message: string; detail?: string }): Promise<boolean>;
   /** 返回 null 表示用户取消或当前模式不支持交互 */
   ask(req: { message: string; secret?: boolean }): Promise<string | null>;
-  select(req: { message: string; options: string[] }): Promise<string | null>;
+  select(req: { message: string; detail?: string; options: string[] }): Promise<string | null>;
   notify(e: { level: 'info' | 'warn' | 'error'; message: string }): void;
 }
 
@@ -868,6 +908,8 @@ export type UIEvent =
       /** 结果的简短预览，完整内容不进 UI 流 */
       preview: string;
       durationMs: number;
+      /** 结构化展示载荷；旧的事件生产者可以省略。 */
+      display?: ToolDisplay;
     }
   | { type: 'permission_request'; req: PermissionRequest }
   | { type: 'permission_resolved'; decision: PermissionDecision }

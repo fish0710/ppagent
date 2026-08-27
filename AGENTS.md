@@ -33,7 +33,7 @@ Match evidence to the surface you touched; don't default to `npm run verify` for
 
 - Changed behavior in one module → run that module's `test/<area>.test.ts` directly with vitest.
 - Touched `src/core` or `src/agent` import edges → `npm run depcruise` (fast, catches layering violations before CI does).
-- Touched TUI rendering → `test/tui.test.ts`, replay against `test/fixtures/tui/*.ndjson`.
+- Touched TUI rendering → `test/tui*.test.ts` (reducer/blocks/theme/prompt-box/commands/app), replay against `test/fixtures/tui/*.ndjson`.
 - Touched anything published (bin/, package.json exports) → `npm run build`.
 - Before a commit that will be pushed, or when unsure → `npm run verify`.
 - Report only the commands you actually ran. CI (`.github/workflows/ci.yml`, ubuntu+macos) owns exhaustive coverage — rehearsing the full suite locally for every small change is wasted signal.

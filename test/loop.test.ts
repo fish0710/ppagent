@@ -367,6 +367,41 @@ describe('agent loop', () => {
     expect(events.filter((event) => event.type === 'tool_end')).toHaveLength(2);
   });
 
+  it('carries a tool-provided display payload onto tool_end without touching the persisted message', async () => {
+    const tool: Tool = {
+      name: 'edit-like',
+      description: 'Returns a display payload.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      concurrencySafe: true,
+      prepareSandbox: passthroughPrepare,
+      async execute() {
+        return {
+          ...textOutput('Replaced 1 occurrence(s) in note.txt'),
+          display: {
+            kind: 'diff' as const,
+            path: 'note.txt',
+            hunks: [],
+            added: 1,
+            removed: 1,
+          },
+        };
+      },
+    };
+    const provider = new FauxProvider({
+      turns: [toolCallTurn({ name: 'edit-like', rawArguments: '{}' }), textTurn('done')],
+    });
+    const events: UIEvent[] = [];
+
+    await runAgentLoop(loopOptions(provider, new ToolRegistry([tool]), events));
+
+    const toolEnd = events.find((event) => event.type === 'tool_end');
+    expect(toolEnd).toMatchObject({
+      type: 'tool_end',
+      name: 'edit-like',
+      display: { kind: 'diff', path: 'note.txt', added: 1, removed: 1 },
+    });
+  });
+
   it('uses unsafe calls as barriers between concurrency-safe batches', async () => {
     const order: string[] = [];
     let active = 0;

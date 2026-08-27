@@ -22,6 +22,28 @@ describe('CLI interaction', () => {
       },
     ]);
   });
+
+  it('auto-approve select() returns allow so --permission-mode allow keeps working', async () => {
+    const notifications: Array<{ level: string; message: string }> = [];
+    const interaction = new AutoApproveInteraction((event) => notifications.push(event));
+
+    await expect(
+      interaction.select({ message: 'run bash', options: ['allow', 'allowAlways', 'deny'] }),
+    ).resolves.toBe('allow');
+    expect(notifications).toEqual([
+      {
+        level: 'warn',
+        message: 'Explicit auto-approve mode allowed permission: run bash',
+      },
+    ]);
+  });
+
+  it('auto-approve select() falls back to the first option when allow is absent', async () => {
+    const interaction = new AutoApproveInteraction(() => undefined);
+    await expect(
+      interaction.select({ message: 'pick', options: ['only-option'] }),
+    ).resolves.toBe('only-option');
+  });
   it('shows a concrete permission summary and accepts n as denial', async () => {
     let output = '';
     const input = new PassThrough();
@@ -51,6 +73,56 @@ describe('CLI interaction', () => {
     expect(output).toContain('Allow? [y/N]');
   });
 
+  it('select() prints detail and accepts y/a/n mnemonics for permission options', async () => {
+    let output = '';
+    const input = new PassThrough();
+    const interaction = new CliInteraction({
+      input,
+      output: new Writable({
+        write(chunk, _encoding, callback) {
+          output += chunk.toString();
+          callback();
+        },
+      }),
+      interactive: true,
+    });
+    input.end('a\n');
+
+    try {
+      await expect(
+        interaction.select({
+          message: 'rm -f /tmp/test.txt',
+          detail: '{"cmd":"rm -f /tmp/test.txt"}',
+          options: ['allow', 'allowAlways', 'deny'],
+        }),
+      ).resolves.toBe('allowAlways');
+    } finally {
+      interaction.close();
+    }
+    expect(output).toContain('rm -f /tmp/test.txt');
+    expect(output).toContain('{"cmd":"rm -f /tmp/test.txt"}');
+    expect(output).toContain('  1. allow');
+    expect(output).toContain('  2. allowAlways');
+    expect(output).toContain('  3. deny');
+  });
+
+  it('select() still accepts a numeric answer', async () => {
+    const input = new PassThrough();
+    const interaction = new CliInteraction({
+      input,
+      output: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      interactive: true,
+    });
+    input.end('3\n');
+    try {
+      await expect(
+        interaction.select({ message: 'pick', options: ['allow', 'allowAlways', 'deny'] }),
+      ).resolves.toBe('deny');
+    } finally {
+      interaction.close();
+    }
+  });
+
   it('uses deny/null defaults when no interactive channel exists', async () => {
     const notifications: Array<{ level: string; message: string }> = [];
     const interaction = new NonInteractiveInteraction((event) => {
@@ -65,6 +137,10 @@ describe('CLI interaction', () => {
       {
         level: 'warn',
         message: 'Non-interactive mode automatically denied permission: danger',
+      },
+      {
+        level: 'warn',
+        message: 'Non-interactive mode automatically denied permission: pick',
       },
     ]);
   });

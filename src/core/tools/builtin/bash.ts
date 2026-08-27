@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { Tool } from '../../types.js';
+import type { Tool, ToolOutput } from '../../types.js';
 import { textOutput } from '../execute.js';
-import { objectArgs, stringArg } from './common.js';
+import { countLines, objectArgs, stringArg } from './common.js';
 
 interface PreparedBashArgs {
   executable: string;
@@ -43,7 +43,16 @@ export const bashTool: Tool = {
     const sections = [`Exit code: ${result.code}`];
     if (result.stdout.length > 0) sections.push(result.stdout);
     if (result.stderr.length > 0) sections.push(`[stderr]\n${result.stderr}`);
-    return textOutput(sections.join('\n'), result.code !== 0);
+    const output: ToolOutput = {
+      ...textOutput(sections.join('\n'), result.code !== 0),
+      display: {
+        kind: 'bash',
+        exitCode: result.code,
+        stdoutLines: countLines(result.stdout),
+        stderrLines: countLines(result.stderr),
+      },
+    };
+    return output;
   },
 };
 

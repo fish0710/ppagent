@@ -15,7 +15,7 @@ import type {
   ToolExecutorDeps,
   ToolExecutorOptions,
 } from '../tools/execute.js';
-import { executeToolCall } from '../tools/execute.js';
+import { executeToolCall, type ToolCallOutcome } from '../tools/execute.js';
 import { ToolRegistry } from '../tools/registry.js';
 
 export interface ReactTurnOptions {
@@ -192,9 +192,9 @@ async function executeOne(
     name: call.name,
     args: call.arguments,
   });
-  let result: ToolResultMessage;
+  let outcome: ToolCallOutcome;
   try {
-    result = await executeToolCall(
+    outcome = await executeToolCall(
       react.registry,
       call,
       { ...react.context, trace: toolTrace },
@@ -202,14 +202,15 @@ async function executeOne(
       react.options,
     );
     span?.end({
-      'tool.is_error': result.isError,
-      'tool.duration_ms': result.durationMs ?? 0,
-      'tool.truncated': result.truncated === true,
+      'tool.is_error': outcome.message.isError,
+      'tool.duration_ms': outcome.message.durationMs ?? 0,
+      'tool.truncated': outcome.message.truncated === true,
     });
   } catch (error) {
     span?.end({}, error);
     throw error;
   }
+  const result = outcome.message;
   react.emit({
     type: 'tool_end',
     id: call.id,
@@ -217,6 +218,7 @@ async function executeOne(
     isError: result.isError,
     preview: resultPreview(result),
     durationMs: result.durationMs ?? 0,
+    ...(outcome.display === undefined ? {} : { display: outcome.display }),
   });
   return result;
 }

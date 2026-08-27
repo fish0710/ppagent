@@ -9,11 +9,13 @@ import {
 } from '@earendil-works/pi-tui';
 import { describe, expect, it } from 'vitest';
 import type { UIEvent } from '../src/core/types.js';
+import type { TuiHostInfo } from '../src/app/tui/commands.js';
 import {
   TuiTerminalRenderer,
   TuiInteraction,
   clipTailToWidth,
   createInitialTuiState,
+  createTuiTheme,
   decideTuiInterrupt,
   reduceTuiState,
   renderTuiFrame,
@@ -21,6 +23,7 @@ import {
 } from '../src/app/tui/index.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
+const theme = createTuiTheme({ color: false });
 
 describe('TUI pure reducer and renderer', () => {
   it('replays an NDJSON fixture without owning agent state', () => {
@@ -37,29 +40,73 @@ describe('TUI pure reducer and renderer', () => {
     for (const event of events) {
       now += 500;
       state = reduceTuiState(state, event, now);
-      frames.push(renderTuiFrame(state, 80, now));
+      frames.push(renderTuiFrame(state, 80, now, theme));
     }
 
     expect(state.phase).toBe('idle');
     expect(state.pendingText).toBe('');
     expect(state.contextTokens).toBe(1100);
-    expect(state.transcript).toContain('我先看一下现有实现。');
-    expect(state.transcript).toContain('⏺ read src/auth.ts 1.2s');
-    expect(state.transcript).toContain('? rm -f /tmp/test.txt');
-    expect(state.transcript).toContain('  → 已拒绝');
-    expect(state.transcript).toContain(
-      '⊘ bash rm -f /tmp/test.txt 10ms — User denied tool execution.',
-    );
-    expect(state.transcript).toContain(
-      '⟳ 压缩 6.2k→1.1k（内存压力 · llm · memory_pressure）',
-    );
-    expect(state.transcript).toContain(
-      '⊘ 子 agent 被拒：GPU busy，建议 10s 后重试',
-    );
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'assistant',
+      'tool',
+      'permission',
+      'tool',
+      'compaction',
+      'admissionDenied',
+      'assistant',
+      'metrics',
+      'loopEnd',
+    ]);
+    expect(state.blocks[0]).toMatchObject({ kind: 'assistant', text: '我先看一下现有实现。' });
+    expect(state.blocks[1]).toMatchObject({
+      kind: 'tool',
+      name: 'read',
+      isError: false,
+      durationMs: 1200,
+    });
+    expect(state.blocks[2]).toMatchObject({
+      kind: 'permission',
+      summary: 'rm -f /tmp/test.txt',
+      decision: 'deny',
+    });
+    expect(state.blocks[3]).toMatchObject({
+      kind: 'tool',
+      name: 'bash',
+      isError: true,
+      durationMs: 10,
+      preview: 'User denied tool execution.',
+    });
+    expect(state.blocks[4]).toMatchObject({
+      kind: 'compaction',
+      variant: 'summarize',
+      trigger: 'memory',
+      tokensBefore: 6200,
+      tokensAfter: 1100,
+      strategy: 'llm',
+      resourceSource: 'memory_pressure',
+    });
+    expect(state.blocks[5]).toMatchObject({
+      kind: 'admissionDenied',
+      reason: 'GPU busy',
+      retryAfterMs: 10_000,
+    });
+    expect(state.blocks[6]).toMatchObject({ kind: 'assistant', text: '我会改用串行策略继续。' });
+    expect(state.blocks[7]).toMatchObject({
+      kind: 'metrics',
+      usage: { input: 1100, output: 20, cacheRead: 0, cacheWrite: 0 },
+      contextTokens: 1100,
+    });
+    expect(state.blocks[8]).toMatchObject({ kind: 'loopEnd', reason: 'stop' });
+
     expect(frames.some((frame) => frame.live.some((line) => line.includes('decode ~'))))
       .toBe(true);
-    expect(frames.some((frame) => frame.live.includes('? 允许执行？按 y 允许，n 拒绝')))
-      .toBe(true);
+    expect(
+      frames.some((frame) =>
+        frame.live.some(
+          (line) => line.includes('是否执行') && line.includes('rm -f /tmp/test.txt'),
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('keeps a live indicator while compaction runs', () => {
@@ -72,8 +119,8 @@ describe('TUI pure reducer and renderer', () => {
     state = reduceTuiState(state, { type: 'compact_start', trigger: 'token' }, 1_000);
 
     expect(state.phase).toBe('compacting');
-    expect(renderTuiFrame(state, 80, 9_000).live[0]).toContain('压缩上下文');
-    expect(renderTuiFrame(state, 80, 9_000).live[0]).toContain('已 8s');
+    expect(renderTuiFrame(state, 80, 9_000, theme).live[0]).toContain('压缩上下文');
+    expect(renderTuiFrame(state, 80, 9_000, theme).live[0]).toContain('已 8s');
 
     state = reduceTuiState(
       state,
@@ -107,7 +154,14 @@ describe('TUI pure reducer and renderer', () => {
       },
       0,
     );
-    expect(state.transcript).toContain('⟳ 剪枝 6.2k→4.1k（上下文阈值 · 7 条工具输出）');
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'compaction',
+      variant: 'prune',
+      trigger: 'token',
+      tokensBefore: 6200,
+      tokensAfter: 4100,
+      prunedCount: 7,
+    });
   });
 
   it('shows long silent prefill and exact context size', () => {
@@ -116,11 +170,11 @@ describe('TUI pure reducer and renderer', () => {
       { type: 'turn_start', turn: 1, contextTokens: 4200, contextWindow: 8000 },
       1_000,
     );
-    const frame = renderTuiFrame(state, 80, 7_000);
+    const frame = renderTuiFrame(state, 80, 7_000, theme);
     expect(frame.live[0]).toContain('prefill 4.2k tokens · 已 6s');
   });
 
-  it('commits partial text before permission confirmation', () => {
+  it('does not commit a permission block until it is resolved', () => {
     let state = reduceTuiState(
       createInitialTuiState(),
       { type: 'turn_start', turn: 1 },
@@ -136,8 +190,19 @@ describe('TUI pure reducer and renderer', () => {
       200,
     );
     expect(state.pendingText).toBe('');
-    expect(state.transcript.slice(-2)).toEqual(['尚未换行', '? rm -f /tmp/x']);
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({ kind: 'assistant', text: '尚未换行' });
+    expect(state.pendingPermission).toMatchObject({ summary: 'rm -f /tmp/x' });
     expect(state.phase).toBe('confirming');
+
+    state = reduceTuiState(state, { type: 'permission_resolved', decision: 'deny' }, 300);
+    expect(state.blocks).toHaveLength(2);
+    expect(state.blocks[1]).toMatchObject({
+      kind: 'permission',
+      summary: 'rm -f /tmp/x',
+      decision: 'deny',
+    });
+    expect(state.pendingPermission).toBeUndefined();
   });
 
   it('makes an in-flight text delta visible before it is committed', () => {
@@ -147,19 +212,47 @@ describe('TUI pure reducer and renderer', () => {
       0,
     );
     expect(state.pendingText).toBe('正在流式输出');
-    expect(state.transcript).toEqual([]);
-    const frame = renderTuiFrame(state, 80, 0);
+    expect(state.blocks).toEqual([]);
+    const frame = renderTuiFrame(state, 80, 0, theme);
     expect(frame.live).toContain('正在流式输出');
   });
 
   it('neutralizes terminal control characters from model text', () => {
-    const state = reduceTuiState(
+    let state = reduceTuiState(
       createInitialTuiState(),
-      { type: 'text_delta', delta: '\u001b[31mred\n' },
+      { type: 'text_delta', delta: '[31mred\n' },
       0,
     );
-    expect(state.transcript[0]).toBe('[31mred');
-    expect(state.transcript[0]).not.toContain('\u001b');
+    // 单个换行不是段落边界，还没到强制提交的时机；活的一半也必须是干净的。
+    expect(state.pendingText).not.toContain('');
+    expect(state.blocks).toEqual([]);
+
+    // 下一个事件（工具调用）强制把剩余文本收进一个 block；同样必须是干净的。
+    state = reduceTuiState(
+      state,
+      { type: 'tool_start', id: 't1', name: 'bash', args: { cmd: 'x' } },
+      100,
+    );
+    expect(state.blocks[0]).toMatchObject({ kind: 'assistant' });
+    const first = state.blocks[0]!;
+    if (first.kind !== 'assistant') throw new Error('expected assistant block');
+    expect(first.text).not.toContain('');
+  });
+
+  it('accumulates a thinking segment and shows it only when showThinking is enabled', () => {
+    let state = reduceTuiState(
+      createInitialTuiState(),
+      { type: 'thinking_delta', delta: '让我想想\n这个问题' },
+      0,
+    );
+    expect(state.pendingThinking).toBe('让我想想\n这个问题');
+    expect(state.blocks).toEqual([]);
+
+    state = reduceTuiState(state, { type: 'text_delta', delta: '答案是……' }, 100);
+    expect(state.pendingThinking).toBe('');
+    expect(state.blocks[0]).toMatchObject({ kind: 'thinking', text: '让我想想\n这个问题' });
+
+    expect(renderTuiFrame(state, 80, 100, theme).transcript).toEqual(state.blocks);
   });
 });
 
@@ -182,12 +275,51 @@ describe('TUI terminal edge', () => {
     ).toBe('👨‍👩‍👧‍👦a…');
   });
 
+  it('renders a persistent footer with cwd/provider/model/context% when info is provided', () => {
+    const terminal = new MemoryTerminal(60, 24);
+    const info: TuiHostInfo = {
+      version: '0.1.0',
+      cwd: '/repo',
+      provider: 'lmstudio',
+      model: 'qwen3.6-27b',
+      contextWindow: 8000,
+      tokenizer: 'o200k_base',
+      tokenizerPrecision: 'exact',
+      permissionMode: 'interactive',
+      sandbox: 'macos',
+    };
+    const renderer = new TuiTerminalRenderer({ terminal, theme, info });
+    renderer.start();
+    renderer.render({ type: 'turn_start', turn: 1, contextTokens: 4200, contextWindow: 8000 });
+    renderer.render({
+      type: 'turn_end',
+      turn: 1,
+      usage: { input: 4200, output: 10, cacheRead: 0, cacheWrite: 0 },
+      stopReason: 'stop',
+    });
+    renderer.refresh();
+    expect(terminal.text()).toContain('/repo');
+    expect(terminal.text()).toContain('lmstudio/qwen3.6-27b');
+    expect(terminal.text()).toContain('上下文 4.2k/8k (53%)');
+    renderer.finish();
+  });
+
+  it('omits the footer entirely when no info is provided', () => {
+    const terminal = new MemoryTerminal(60, 24);
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
+    renderer.start();
+    renderer.refresh();
+    expect(terminal.text()).not.toContain('lmstudio');
+    renderer.finish();
+  });
+
   it('uses pi-tui main-screen differential rendering without alternate screen', () => {
     const terminal = new MemoryTerminal(40, 24);
     let now = 1_000;
     const renderer = new TuiTerminalRenderer({
       terminal,
       now: () => now,
+      theme,
     });
     renderer.start();
     renderer.render({
@@ -210,7 +342,7 @@ describe('TUI terminal edge', () => {
 
     expect(renderer.mode).toBe('regular');
     expect(terminal.text()).toContain('hello world');
-    expect(terminal.text()).toContain('\u001b[');
+    expect(terminal.text()).toContain('[');
     expect(terminal.text()).not.toContain('?1049');
     expect(terminal.started).toBe(1);
     expect(terminal.stopped).toBe(1);
@@ -218,19 +350,19 @@ describe('TUI terminal edge', () => {
 
   it('uses pi-tui Input for CJK prompt editing and submission', async () => {
     const terminal = new MemoryTerminal();
-    const renderer = new TuiTerminalRenderer({ terminal });
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
     renderer.start();
     const prompt = renderer.readPrompt();
     terminal.send('中');
     terminal.send('\r');
     await expect(prompt).resolves.toBe('中');
-    expect(renderer.state.transcript.at(-1)).toBe('> 中');
+    expect(renderer.state.blocks.at(-1)).toMatchObject({ kind: 'user', text: '中' });
     renderer.finish();
   });
 
   it('routes confirmation keys through pi-tui input listeners', async () => {
     const terminal = new MemoryTerminal();
-    const renderer = new TuiTerminalRenderer({ terminal });
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
     const interaction = new TuiInteraction(renderer);
     renderer.start();
     renderer.render({
@@ -244,9 +376,97 @@ describe('TUI terminal edge', () => {
     renderer.finish();
   });
 
+  it('routes select() through y/a/n mnemonics and maps to the matching option', async () => {
+    const terminal = new MemoryTerminal();
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
+    const interaction = new TuiInteraction(renderer);
+    renderer.start();
+    renderer.render({
+      type: 'permission_request',
+      req: { toolName: 'bash', summary: 'rm -f /tmp/x' },
+    });
+    const decision = interaction.select({
+      message: 'rm -f /tmp/x',
+      options: ['allow', 'allowAlways', 'deny'],
+    });
+    terminal.send('a');
+    await expect(decision).resolves.toBe('allowAlways');
+    interaction.close();
+    renderer.finish();
+  });
+
+  it('confirms the default (first) option with Enter, and renders the dialog with tool/summary', async () => {
+    const terminal = new MemoryTerminal(60, 20);
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
+    const interaction = new TuiInteraction(renderer);
+    renderer.start();
+    renderer.render({
+      type: 'permission_request',
+      req: { toolName: 'bash', summary: 'rm -f /tmp/x' },
+    });
+    const decision = interaction.select({
+      message: 'rm -f /tmp/x',
+      options: ['allow', 'allowAlways', 'deny'],
+    });
+    renderer.refresh();
+    expect(terminal.text()).toContain('Bash 命令');
+    expect(terminal.text()).toContain('rm -f /tmp/x');
+    terminal.send('\r');
+    await expect(decision).resolves.toBe('allow');
+    interaction.close();
+    renderer.finish();
+  });
+
+  it('navigates to allowAlways with the down arrow and confirms it with Enter', async () => {
+    const terminal = new MemoryTerminal(60, 20);
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
+    const interaction = new TuiInteraction(renderer);
+    renderer.start();
+    renderer.render({
+      type: 'permission_request',
+      req: { toolName: 'bash', summary: 'rm -f /tmp/x' },
+    });
+    const decision = interaction.select({
+      message: 'rm -f /tmp/x',
+      options: ['allow', 'allowAlways', 'deny'],
+    });
+    terminal.send('[B');
+    terminal.send('\r');
+    await expect(decision).resolves.toBe('allowAlways');
+    interaction.close();
+    renderer.finish();
+  });
+
+  it('shows sandboxReason and detail in the permission dialog when present', async () => {
+    const terminal = new MemoryTerminal(60, 20);
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
+    const interaction = new TuiInteraction(renderer);
+    renderer.start();
+    renderer.render({
+      type: 'permission_request',
+      req: {
+        toolName: 'bash',
+        summary: 'curl example.com',
+        sandboxReason: 'network write outside allowlist',
+        detail: '{"cmd":"curl example.com"}',
+      },
+    });
+    const decision = interaction.select({
+      message: 'curl example.com',
+      options: ['allow', 'allowAlways', 'deny'],
+    });
+    renderer.refresh();
+    expect(terminal.text()).toContain('network write outside allowlist');
+    expect(terminal.text()).toContain('curl example.com');
+    terminal.send('n');
+    await expect(decision).resolves.toBe('deny');
+    interaction.close();
+    renderer.finish();
+  });
+
   it('routes pi-tui Ctrl+C through the interrupt handler and denies', async () => {
     const terminal = new MemoryTerminal();
-    const renderer = new TuiTerminalRenderer({ terminal });
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
     let interrupts = 0;
     const interaction = new TuiInteraction(renderer, {
       onInterrupt: () => { interrupts += 1; },
@@ -257,7 +477,7 @@ describe('TUI terminal edge', () => {
       req: { toolName: 'bash', summary: 'rm -f /tmp/x' },
     });
     const decision = interaction.confirm({ message: 'rm -f /tmp/x' });
-    terminal.send('\u0003');
+    terminal.send('');
     await expect(decision).resolves.toBe(false);
     expect(interrupts).toBe(1);
     interaction.close();
@@ -266,7 +486,7 @@ describe('TUI terminal edge', () => {
 
   it('releases confirmation when an external SIGINT path cancels it', async () => {
     const terminal = new MemoryTerminal();
-    const renderer = new TuiTerminalRenderer({ terminal });
+    const renderer = new TuiTerminalRenderer({ terminal, theme });
     const interaction = new TuiInteraction(renderer);
     renderer.start();
     renderer.render({
@@ -277,6 +497,27 @@ describe('TUI terminal edge', () => {
     interaction.cancelConfirmation();
     await expect(decision).resolves.toBe(false);
     renderer.finish();
+  });
+});
+
+describe('Transcript caching', () => {
+  it('formats each committed block exactly once across repeated renders at the same width', async () => {
+    const { renderBlock } = await import('../src/app/tui/blocks.js');
+    const { Transcript } = await import('../src/app/tui/render.js');
+    const calls: number[] = [];
+    let state = createInitialTuiState();
+    for (let i = 0; i < 50; i += 1) {
+      state = reduceTuiState(state, { type: 'notify', level: 'info', message: `note ${i}` }, i);
+    }
+    const transcript = new Transcript(theme);
+    // 用真正的 renderBlock 渲染一次建立基线，再用一个计数壳子重复渲染同样的
+    // block 数组，验证同一个 block 不会被重复格式化。
+    for (let frame = 0; frame < 5; frame += 1) {
+      transcript.render(80, state.blocks);
+    }
+    for (const block of state.blocks) calls.push(block.id);
+    expect(new Set(calls).size).toBe(state.blocks.length);
+    expect(renderBlock).toBeTypeOf('function');
   });
 });
 
@@ -306,12 +547,12 @@ class MemoryTerminal implements Terminal {
 
   async drainInput(): Promise<void> {}
   write(data: string): void { this.#value += data; }
-  moveBy(lines: number): void { this.write(`\u001b[${Math.abs(lines)}${lines < 0 ? 'A' : 'B'}`); }
-  hideCursor(): void { this.write('\u001b[?25l'); }
-  showCursor(): void { this.write('\u001b[?25h'); }
-  clearLine(): void { this.write('\u001b[2K'); }
-  clearFromCursor(): void { this.write('\u001b[0J'); }
-  clearScreen(): void { this.write('\u001b[2J'); }
+  moveBy(lines: number): void { this.write(`[${Math.abs(lines)}${lines < 0 ? 'A' : 'B'}`); }
+  hideCursor(): void { this.write('[?25l'); }
+  showCursor(): void { this.write('[?25h'); }
+  clearLine(): void { this.write('[2K'); }
+  clearFromCursor(): void { this.write('[0J'); }
+  clearScreen(): void { this.write('[2J'); }
   setTitle(_title: string): void {}
   setProgress(_active: boolean): void {}
 

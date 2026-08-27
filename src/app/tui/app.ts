@@ -1,18 +1,29 @@
-import { Key, matchesKey } from '@earendil-works/pi-tui';
-import type { AgentSession } from '../../agent/session.js';
+import { CombinedAutocompleteProvider, Key, matchesKey } from '@earendil-works/pi-tui';
+import {
+  createTuiCommands,
+  parseSlashCommand,
+  toAutocompleteCommands,
+  UNKNOWN_HOST_INFO,
+  type TuiCommand,
+  type TuiCommandContext,
+  type TuiCommandResult,
+  type TuiHostInfo,
+  type TuiSessionPort,
+} from './commands.js';
 import { TuiInteraction } from './interaction.js';
 import { TuiTerminalRenderer } from './render.js';
 
-export type TuiSessionPort = Pick<
-  AgentSession,
-  'prompt' | 'compact' | 'abort' | 'subscribe' | 'setInteraction'
->;
+export type { TuiSessionPort } from './commands.js';
 
 export interface TuiAppOptions {
   renderer?: TuiTerminalRenderer;
   now?: () => number;
   /** 第二次 Ctrl+C 不直接 process.exit；由宿主决定退出码，等待取消清理完成。 */
   requestProcessExit?: (code: number) => void;
+  /** provider/model/cwd 等静态信息，供 /status 这类命令展示；bin/agent.ts 注入。 */
+  info?: TuiHostInfo;
+  /** 测试注入；默认使用 createTuiCommands() 的完整注册表。 */
+  commands?: readonly TuiCommand[];
 }
 
 export interface TuiRunResult {
@@ -39,6 +50,8 @@ export class TuiApp {
   readonly interaction: TuiInteraction;
   readonly #now: () => number;
   readonly #requestProcessExit: (code: number) => void;
+  readonly #info: TuiHostInfo;
+  readonly #commands: readonly TuiCommand[];
   #session: TuiSessionPort | undefined;
   #running = false;
   #exitRequested = false;
@@ -48,9 +61,15 @@ export class TuiApp {
     this.#now = options.now ?? Date.now;
     this.#requestProcessExit =
       options.requestProcessExit ?? ((code) => { process.exitCode = code; });
+    this.#info = options.info ?? UNKNOWN_HOST_INFO;
+    this.#commands = options.commands ?? createTuiCommands();
     this.renderer = options.renderer ?? new TuiTerminalRenderer({
       ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.info === undefined ? {} : { info: options.info }),
     });
+    this.renderer.setAutocompleteProvider(
+      new CombinedAutocompleteProvider(toAutocompleteCommands(this.#commands), this.#info.cwd),
+    );
     this.interaction = new TuiInteraction(this.renderer, {
       onInterrupt: () => this.#handleInterrupt(),
     });
@@ -68,14 +87,18 @@ export class TuiApp {
     const unsubscribe = session.subscribe((event) => this.renderer.render(event));
     const removeInputListener = this.renderer.addInputListener((data) => {
       // confirmation 自己消费 Ctrl+C，以便同时 resolve(false)；其余阶段走两级取消。
-      if (
-        this.renderer.state.phase === 'confirming' ||
-        !matchesKey(data, Key.ctrl('c'))
-      ) {
-        return undefined;
+      if (this.renderer.state.phase === 'confirming') return undefined;
+      if (matchesKey(data, Key.ctrl('c'))) {
+        this.#handleInterrupt();
+        return { consume: true };
       }
-      this.#handleInterrupt();
-      return { consume: true };
+      // esc 是单级取消：只中断当前这一轮，不进入 Ctrl+C 的两级退出阶梯；
+      // 空闲时按 esc 没有意义，交还给 Editor 自己处理（比如关闭补全菜单）。
+      if (this.#running && matchesKey(data, Key.escape)) {
+        this.#session?.abort(new Error('Interrupted by user'));
+        return { consume: true };
+      }
+      return undefined;
     });
     const onSigint = (): void => this.#handleInterrupt();
     process.on('SIGINT', onSigint);
@@ -83,29 +106,60 @@ export class TuiApp {
     try {
       let prompt = initialPrompt?.trim() ?? '';
       let promptWasRendered = false;
-      while (!this.#exitRequested) {
+      // 和 #exitRequested 分开：后者只在两级 Ctrl+C 阶梯里置真，退出码要
+      // Math.max(..., 130)；/exit 是用户主动的干净退出，不该被算成中断退出码。
+      let voluntaryExit = false;
+      while (!this.#exitRequested && !voluntaryExit) {
         if (prompt.length === 0) {
           const answer = await this.renderer.readPrompt();
           if (answer === null) break;
           prompt = answer.trim();
           promptWasRendered = true;
         }
-        if (prompt === '/exit' || prompt === '/quit') break;
         if (prompt.length === 0) {
           promptWasRendered = false;
           continue;
         }
         if (!promptWasRendered) this.renderer.submitPrompt(prompt);
+        const match = parseSlashCommand(prompt, this.#commands);
+        if (match !== null) {
+          if (match.kind === 'unknown') {
+            this.renderer.render({
+              type: 'notify',
+              level: 'warn',
+              message: `未知命令 /${match.name}，输入 /help 查看可用命令`,
+            });
+            prompt = '';
+            promptWasRendered = false;
+            continue;
+          }
+          const ctx: TuiCommandContext = {
+            session,
+            state: this.renderer.state,
+            info: this.#info,
+            emit: (text) => this.renderer.render({ type: 'notify', level: 'info', message: text }),
+            requestExit: () => { voluntaryExit = true; },
+          };
+          let result: TuiCommandResult;
+          try {
+            result = await match.command.run(match.args, ctx);
+          } catch (error) {
+            this.renderer.render({ type: 'error', message: errorMessage(error) });
+            result = { prompt: null };
+          }
+          if (result.prompt === null) {
+            prompt = '';
+            promptWasRendered = false;
+            continue;
+          }
+          // 命令合成了一个新 prompt（如 /init）；用户看到的是自己敲的命令本身，
+          // 合成出来的真正指令静默发给模型，不再重复展示一次。
+          prompt = result.prompt;
+        }
         this.#running = true;
         try {
-          // /compact [说明]：在撞到阈值之前主动腾地方，可选的说明会附加到摘要指令后。
-          const compactArgs = slashArguments(prompt, '/compact');
-          if (compactArgs !== null) {
-            await session.compact(compactArgs.length === 0 ? undefined : compactArgs);
-          } else {
-            const result = await session.prompt(prompt);
-            if (result.reason === 'error' || result.reason === 'maxTurns') exitCode = 1;
-          }
+          const result = await session.prompt(prompt);
+          if (result.reason === 'error' || result.reason === 'maxTurns') exitCode = 1;
         } catch (error) {
           exitCode = 1;
           this.renderer.render({ type: 'error', message: errorMessage(error) });
@@ -161,15 +215,4 @@ export class TuiApp {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * 命中斜杠命令时返回其参数（可能是空串），否则返回 null。
- * 只认完整命令词，"/compacted" 这类前缀相同的普通输入不会被误判。
- */
-function slashArguments(prompt: string, command: string): string | null {
-  if (prompt === command) return '';
-  return prompt.startsWith(`${command} `)
-    ? prompt.slice(command.length + 1).trim()
-    : null;
 }

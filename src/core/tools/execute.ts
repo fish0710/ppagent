@@ -6,6 +6,7 @@ import type {
   Tool,
   ToolCallBlock,
   ToolContext,
+  ToolDisplay,
   ToolOutput,
   ToolResultMessage,
 } from '../types.js';
@@ -126,13 +127,22 @@ export async function executeTool(
   }
 }
 
+export interface ToolCallOutcome {
+  message: ToolResultMessage;
+  /**
+   * 仅供 UI；不进 ToolResultMessage，不落盘、不参与 compact/resume。
+   * 详见 core/types.ts 上 ToolOutput.display 的注释。
+   */
+  display?: ToolDisplay;
+}
+
 export async function executeToolCall(
   registry: ToolRegistry,
   call: ToolCallBlock,
   ctx: ToolContext,
   deps: ToolExecutorDeps,
   options: ToolExecutorOptions,
-): Promise<ToolResultMessage> {
+): Promise<ToolCallOutcome> {
   const startedAt = (options.now ?? Date.now)();
   const tool = registry.get(call.name);
   const output =
@@ -143,7 +153,7 @@ export async function executeToolCall(
         )
       : await executeTool(tool, call.arguments, ctx, deps, options);
   const endedAt = (options.now ?? Date.now)();
-  return {
+  const message: ToolResultMessage = {
     role: 'toolResult',
     toolCallId: call.id,
     toolName: call.name,
@@ -152,6 +162,10 @@ export async function executeToolCall(
     ...(output.truncated === true ? { truncated: true } : {}),
     durationMs: Math.max(0, endedAt - startedAt),
     timestamp: endedAt,
+  };
+  return {
+    message,
+    ...(output.display === undefined ? {} : { display: output.display }),
   };
 }
 

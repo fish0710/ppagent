@@ -1,7 +1,8 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import type { Tool } from '../../types.js';
+import type { Tool, ToolOutput } from '../../types.js';
 import { textOutput } from '../execute.js';
 import { objectArgs, pathSandboxPreparation, stringArg } from './common.js';
+import { computeEditDiff } from './diff.js';
 
 export const editTool: Tool = {
   name: 'edit',
@@ -43,7 +44,19 @@ export const editTool: Tool = {
       ? original.replaceAll(oldText, newText)
       : original.replace(oldText, newText);
     await writeFile(path, updated, { encoding: 'utf8', signal: ctx.signal });
-    return textOutput(`Replaced ${replaceAll ? occurrences : 1} occurrence(s) in ${path}`);
+    const diff = computeEditDiff(original, oldText, newText, replaceAll);
+    const output: ToolOutput = {
+      ...textOutput(`Replaced ${replaceAll ? occurrences : 1} occurrence(s) in ${path}`),
+      display: {
+        kind: 'diff',
+        path,
+        hunks: diff.hunks,
+        added: diff.added,
+        removed: diff.removed,
+        ...(diff.truncatedLines === undefined ? {} : { truncatedLines: diff.truncatedLines }),
+      },
+    };
+    return output;
   },
 };
 

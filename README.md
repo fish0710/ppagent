@@ -22,7 +22,7 @@
 - M9：macOS `sandbox-exec` 隔离、路径越界与网络白名单已完成
 - M10：macOS 资源探针、内存/GPU 准入和 `spawn_subagent` 已完成
 - M11：本地 provider 别名、原生 tool calling 探针、匹配 tokenizer、Laminar 与 Harbor 适配器已完成
-- 可选 TUI：scrollback transcript、固定 live 区、本地推理指标与单键权限确认已完成
+- 可选 TUI：多行输入框、斜杠命令、分块渲染与配色、三选项权限弹窗、常驻状态栏已完成
 
 M0–M11 的开发路线已经贯通；目前仍是源码构建使用，还没有可安装的发行版本。
 
@@ -60,8 +60,8 @@ node bin/agent.js "读取 package.json 并告诉我依赖了哪些包"
 ### 使用轻量 TUI
 
 TUI 只消费 `UIEvent` 并实现 `Interaction`，不持有 context、loop 或 tool 状态。终端设施使用
-`@earendil-works/pi-tui` 的 `TuiMainScreen`，不进入 alternate screen；已经提交的 transcript
-会留在终端 scrollback，底部的 prefill、decode 和工具状态由 pi-tui 做同步差分渲染：
+`@earendil-works/pi-tui` 的 `TuiMainScreen`，不进入 alternate screen；已经提交的消息块会留在
+终端 scrollback，底部的 prefill、decode 和工具状态由 pi-tui 做同步差分渲染：
 
 ```bash
 node bin/agent.js --tui
@@ -72,13 +72,31 @@ node bin/agent.js --tui \
   "读取 package.json 并说明项目结构"
 ```
 
-空闲时输入 `/exit` 或 `/quit` 退出。任务运行时第一次 `Ctrl+C` 调用 `session.abort()` 并等待工具
-进程组清理，1.5 秒内第二次按下则请求退出；空闲时 `Ctrl+C` 直接退出。`ProcessTerminal` 统一管理
-raw mode 和键盘协议，prompt 使用 pi-tui `Input`（支持 CJK/IME、编辑和 bracketed paste），权限确认
-通过 input listener 消费单键 `y/n`。
+**输入框**是圆角方框包裹的 pi-tui `Editor`：支持多行编辑（`Alt+Enter`/`Shift+Enter` 换行，
+`Enter` 提交）、`↑↓` 翻历史、`Tab`/`@` 文件路径补全、CJK/IME、bracketed paste。
+
+**斜杠命令**：`/help` 列出全部命令，`/compact [说明]` 手动压缩上下文，`/cost` 显示累计 token
+用量，`/status` 显示当前 provider/model/目录/上下文占比，`/tools` 列出已注册工具，`/init` 让模型
+检查或生成 `AGENTS.md`，`/exit`/`/quit` 退出。未注册的斜杠命令会被拒绝并提示，不会当作普通消息
+发给模型。
+
+**消息展示**分块渲染并按语义配色：assistant 文本走 markdown 渲染，工具调用显示为
+`⏺ Bash(cmd)` / `⏺ Update(path)` 这样的表头，`edit` 的结果会带行号和 +/- 配色的 diff，
+`bash`/`read` 会显示行数摘要而不是原文转储。终端不支持颜色（`NO_COLOR`、非 TTY、`TERM=dumb`）
+时自动降级为纯文本。
+
+**权限确认**是一个三选项弹窗（`允许` / `允许，且本会话不再询问` / `拒绝`），`y`/`a`/`n` 仍是可用的
+单键快捷方式，方向键 + `Enter` 也可以。选了"本会话不再询问"之后，同一个工具（或同一条沙箱升级
+原因）在本次会话里不会再问。
+
+任务运行时 `esc` 单级中断当前这一轮（`session.abort()`），不退出程序；第一次 `Ctrl+C` 同样
+中断当前轮，1.5 秒内第二次按下则请求退出；空闲时 `Ctrl+C` 直接退出。`ProcessTerminal` 统一管理
+raw mode 和键盘协议。
 
 live 区显示静默 prefill 时间、近似流式 tok/s 和上下文占比；一轮结束后使用 provider 的 usage
-提交精确 tok/s。内存压缩和子 agent 准入拒绝作为永久 transcript 行显示，并包含资源采样来源。
+提交精确 tok/s。内存压缩和子 agent 准入拒绝作为永久消息块显示，并包含资源采样来源。底部常驻一行
+状态栏：当前目录、`provider/model`、上下文占比——同时开着几个本地推理服务时用来确认"在跟哪个
+endpoint 说话"。
 
 ### 验证脚本调用与 JSONL
 

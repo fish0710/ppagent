@@ -205,7 +205,7 @@ describe('executeTool', () => {
     if (call === undefined) throw new Error('Expected faux tool call');
     expect(typeof call.arguments).toBe('string');
 
-    const result = await executeToolCall(
+    const outcome = await executeToolCall(
       new ToolRegistry([orderedTool([])]),
       call,
       CONTEXT,
@@ -217,7 +217,7 @@ describe('executeTool', () => {
       OPTIONS,
     );
 
-    expect(result).toMatchObject({
+    expect(outcome.message).toMatchObject({
       role: 'toolResult',
       isError: true,
       content: [
@@ -340,7 +340,7 @@ describe('executeTool', () => {
   });
 
   it('propagates truncated: true to the tool-result message', async () => {
-    const result = await executeToolCall(
+    const outcome = await executeToolCall(
       new ToolRegistry([orderedTool([])]),
       {
         type: 'toolCall',
@@ -357,7 +357,7 @@ describe('executeTool', () => {
       { ...OPTIONS, now: sequentialNow(100, 107) },
     );
 
-    expect(result).toMatchObject({
+    expect(outcome.message).toMatchObject({
       role: 'toolResult',
       toolCallId: 'call-1',
       toolName: 'ordered',

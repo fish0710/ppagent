@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
-import type { Tool } from '../../types.js';
+import type { Tool, ToolOutput } from '../../types.js';
 import { textOutput } from '../execute.js';
-import { objectArgs, pathSandboxPreparation, stringArg } from './common.js';
+import { countLines, objectArgs, pathSandboxPreparation, stringArg } from './common.js';
 
 export const readTool: Tool = {
   name: 'read',
@@ -27,9 +27,27 @@ export const readTool: Tool = {
     if (offset < 1) throw new Error('offset must be at least 1');
     if (limit < 1) throw new Error('limit must be at least 1');
     const text = await readFile(path, { encoding: 'utf8', signal: ctx.signal });
-    if (offset === 1 && limit === Number.POSITIVE_INFINITY) return textOutput(text);
+    if (offset === 1 && limit === Number.POSITIVE_INFINITY) {
+      const totalLines = countLines(text);
+      const output: ToolOutput = {
+        ...textOutput(text),
+        display: { kind: 'read', path, lines: totalLines, totalLines },
+      };
+      return output;
+    }
     const lines = text.split('\n');
-    return textOutput(lines.slice(offset - 1, offset - 1 + limit).join('\n'));
+    const selected = lines.slice(offset - 1, offset - 1 + limit);
+    const output: ToolOutput = {
+      ...textOutput(selected.join('\n')),
+      display: {
+        kind: 'read',
+        path,
+        lines: selected.length,
+        totalLines: lines.length,
+        ...(offset === 1 ? {} : { offset }),
+      },
+    };
+    return output;
   },
 };
 

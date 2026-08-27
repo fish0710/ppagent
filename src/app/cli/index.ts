@@ -159,14 +159,20 @@ export class CliInteraction implements Interaction {
 
   async select(request: {
     message: string;
+    detail?: string;
     options: string[];
   }): Promise<string | null> {
     if (!this.#interactive || request.options.length === 0) return null;
     this.#output.write(`${request.message}\n`);
+    if (request.detail !== undefined) {
+      this.#output.write(`${request.detail}\n`);
+    }
     request.options.forEach((option, index) => {
       this.#output.write(`  ${index + 1}. ${option}\n`);
     });
-    const answer = await this.#question('Select: ');
+    const answer = (await this.#question('Select: ')).trim();
+    const byLetter = selectByLetter(request.options, answer);
+    if (byLetter !== undefined) return byLetter;
     const index = Number(answer) - 1;
     return Number.isInteger(index) ? request.options[index] ?? null : null;
   }
@@ -238,7 +244,11 @@ export class NonInteractiveInteraction implements Interaction {
     return null;
   }
 
-  async select(_request: Parameters<Interaction['select']>[0]): Promise<null> {
+  async select(request: Parameters<Interaction['select']>[0]): Promise<null> {
+    this.notify({
+      level: 'warn',
+      message: `Non-interactive mode automatically denied permission: ${request.message}`,
+    });
     return null;
   }
 
@@ -278,13 +288,29 @@ export class AutoApproveInteraction implements Interaction {
     return null;
   }
 
-  async select(): Promise<null> {
-    return null;
+  async select(request: Parameters<Interaction['select']>[0]): Promise<string | null> {
+    this.#notify({
+      level: 'warn',
+      message: `Explicit auto-approve mode allowed permission: ${request.message}`,
+    });
+    return request.options.includes('allow') ? 'allow' : (request.options[0] ?? null);
   }
 
   notify(event: Parameters<Interaction['notify']>[0]): void {
     this.#notify(event);
   }
+}
+
+/**
+ * y/a/n 是权限对话框（allow/allowAlways/deny）的肌肉记忆快捷键；对其余
+ * 通用 select() 调用（选项不含这三个字面量）静默不匹配，回落到数字选择。
+ */
+function selectByLetter(options: string[], answer: string): string | null | undefined {
+  const letter = answer.toLowerCase();
+  if (letter === 'y' && options.includes('allow')) return 'allow';
+  if (letter === 'a' && options.includes('allowAlways')) return 'allowAlways';
+  if (letter === 'n' && options.includes('deny')) return 'deny';
+  return undefined;
 }
 
 function hasTty(stream: object): boolean {

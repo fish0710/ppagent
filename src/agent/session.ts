@@ -59,6 +59,7 @@ import type {
   Summarizer,
   TokenCounter,
   ToolContext,
+  ToolDef,
   TraceContext,
   UIEvent,
 } from '../core/types.js';
@@ -71,6 +72,8 @@ export interface AgentSession {
   abort(reason?: unknown): void;
   subscribe(handler: (event: UIEvent) => void): () => void;
   setInteraction(interaction: Interaction): void;
+  /** 已注册工具的定义；供 /tools 这类只读展示用，不代表可以直接调用工具。 */
+  listTools(): readonly ToolDef[];
   readonly context: ReadonlyContext;
 }
 
@@ -394,6 +397,10 @@ export class DefaultAgentSession implements AgentSession {
 
   setInteraction(interaction: Interaction): void {
     this.#interaction = interaction;
+  }
+
+  listTools(): readonly ToolDef[] {
+    return this.#registry.definitions();
   }
 
   /**
