@@ -13,7 +13,13 @@ import {
 } from '@earendil-works/pi-tui';
 import { homedir } from 'node:os';
 import type { UIEvent } from '../../core/types.js';
-import { renderBlock, DEFAULT_RENDER_OPTIONS, type TranscriptBlock, type TuiRenderOptions } from './blocks.js';
+import {
+  renderBlock,
+  toSingleLines,
+  DEFAULT_RENDER_OPTIONS,
+  type TranscriptBlock,
+  type TuiRenderOptions,
+} from './blocks.js';
 import type { TuiHostInfo } from './commands.js';
 import { formatContext, formatDuration, formatRate, formatTokenCount } from './format.js';
 import { PromptBox } from './prompt-box.js';
@@ -27,6 +33,7 @@ import { createTuiTheme, type TuiTheme } from './theme.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
 const MAX_VISIBLE_TOOLS = 3;
+const MAX_PENDING_LIVE_LINES = 6;
 
 export interface TuiFrame {
   /** append-only；由 Transcript 组件按 block 增量渲染并缓存。 */
@@ -59,7 +66,7 @@ export function renderTuiFrame(
   }
 
   if (state.pendingText.length > 0) {
-    live.push(clipTailToWidth(state.pendingText, safeWidth));
+    live.push(...renderPendingText(state.pendingText, safeWidth));
   }
 
   if (state.phase === 'tool_running') {
@@ -137,6 +144,27 @@ export function renderTuiFrame(
   }
 
   return { transcript: state.blocks, live };
+}
+
+/**
+ * 尚未提交的流式文本。**必须**按 '\n' 拆开：pi-tui 的 Component.render 契约是
+ * 一个数组元素一个物理行，而 visibleWidth() 把 '\n' 当 0 宽，它的超宽断言拦不
+ * 住多行字符串——TuiMainScreen 会多写几行却只推进一行光标，之后每一帧都在错位
+ * 的行号上做差分（残留的重复行、被写掉半截的状态栏）。未闭合的 ``` 围栏会让
+ * pendingText 攒下整段代码块，所以这条路径天天被踩到。
+ *
+ * 只留末尾若干行：live 区域是活动指示，不是第二份 transcript；内容闭合后会以
+ * 完整 markdown 的形式提交进 blocks。
+ */
+export function renderPendingText(value: string, width: number): string[] {
+  const lines = value.split('\n');
+  const shown = lines.slice(Math.max(0, lines.length - MAX_PENDING_LIVE_LINES));
+  return shown.map((line, index) =>
+    // 最后一行还在被追加，看尾部才能看到新字符；上面那些已经写完了，看开头。
+    index === shown.length - 1
+      ? clipTailToWidth(line, width)
+      : truncateToWidth(line, width, '…'),
+  );
 }
 
 /** live 文本优先展示尾部，列宽与 grapheme 处理交给 pi-tui。 */
@@ -421,9 +449,11 @@ class TuiDocument implements Component, Focusable {
       this.#info === undefined
         ? []
         : [renderFooter(state, this.#info, safeWidth, this.#theme)];
-    if (!this.#inputEnabled) return [...transcriptLines, ...frame.live, ...footer];
-    const input = this.#promptBox.render(safeWidth);
-    return [...transcriptLines, ...frame.live, ...input, ...footer];
+    const input = this.#inputEnabled ? this.#promptBox.render(safeWidth) : [];
+    // 这里是交给 pi-tui 的最后一道关口。漏一个 '\n' 出去，TuiMainScreen 的行号
+    // 就会和屏幕上的实际行数永久错开，之后每一帧都在错的位置做差分——整块屏幕
+    // 花掉，而不只是这一行坏掉。上游各自负责断在正确的位置，这里只保证兜底。
+    return toSingleLines([...transcriptLines, ...frame.live, ...input, ...footer]);
   }
 }
 

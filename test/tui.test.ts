@@ -8,7 +8,7 @@ import {
   type Terminal,
 } from '@earendil-works/pi-tui';
 import { describe, expect, it } from 'vitest';
-import type { UIEvent } from '../src/core/types.js';
+import type { ToolCallId, UIEvent } from '../src/core/types.js';
 import type { TuiHostInfo } from '../src/app/tui/commands.js';
 import {
   TuiTerminalRenderer,
@@ -18,7 +18,9 @@ import {
   createTuiTheme,
   decideTuiInterrupt,
   reduceTuiState,
+  renderBlock,
   renderTuiFrame,
+  type TranscriptBlockBody,
   type TuiState,
 } from '../src/app/tui/index.js';
 
@@ -49,7 +51,6 @@ describe('TUI pure reducer and renderer', () => {
     expect(state.blocks.map((block) => block.kind)).toEqual([
       'assistant',
       'tool',
-      'permission',
       'tool',
       'compaction',
       'admissionDenied',
@@ -64,19 +65,16 @@ describe('TUI pure reducer and renderer', () => {
       isError: false,
       durationMs: 1200,
     });
+    // 被拒绝的调用不再单独记一条 permission block：结果就在这条 isError 的
+    // 工具结果里，两条一起出现只会让同一条命令在屏幕上重复。
     expect(state.blocks[2]).toMatchObject({
-      kind: 'permission',
-      summary: 'rm -f /tmp/test.txt',
-      decision: 'deny',
-    });
-    expect(state.blocks[3]).toMatchObject({
       kind: 'tool',
       name: 'bash',
       isError: true,
       durationMs: 10,
       preview: 'User denied tool execution.',
     });
-    expect(state.blocks[4]).toMatchObject({
+    expect(state.blocks[3]).toMatchObject({
       kind: 'compaction',
       variant: 'summarize',
       trigger: 'memory',
@@ -85,18 +83,18 @@ describe('TUI pure reducer and renderer', () => {
       strategy: 'llm',
       resourceSource: 'memory_pressure',
     });
-    expect(state.blocks[5]).toMatchObject({
+    expect(state.blocks[4]).toMatchObject({
       kind: 'admissionDenied',
       reason: 'GPU busy',
       retryAfterMs: 10_000,
     });
-    expect(state.blocks[6]).toMatchObject({ kind: 'assistant', text: '我会改用串行策略继续。' });
-    expect(state.blocks[7]).toMatchObject({
+    expect(state.blocks[5]).toMatchObject({ kind: 'assistant', text: '我会改用串行策略继续。' });
+    expect(state.blocks[6]).toMatchObject({
       kind: 'metrics',
       usage: { input: 1100, output: 20, cacheRead: 0, cacheWrite: 0 },
       contextTokens: 1100,
     });
-    expect(state.blocks[8]).toMatchObject({ kind: 'loopEnd', reason: 'stop' });
+    expect(state.blocks[7]).toMatchObject({ kind: 'loopEnd', reason: 'stop' });
 
     expect(frames.some((frame) => frame.live.some((line) => line.includes('decode ~'))))
       .toBe(true);
@@ -174,7 +172,41 @@ describe('TUI pure reducer and renderer', () => {
     expect(frame.live[0]).toContain('prefill 4.2k tokens · 已 6s');
   });
 
-  it('does not commit a permission block until it is resolved', () => {
+  it('marks every segment after the first as a continuation of the same reply', () => {
+    let state = reduceTuiState(
+      createInitialTuiState(),
+      { type: 'turn_start', turn: 1 },
+      0,
+    );
+    state = reduceTuiState(
+      state,
+      { type: 'text_delta', delta: '你好！\n\n我可以帮你：\n\n- 读文件\n- 改代码\n\n完。\n\n' },
+      100,
+    );
+    const assistants = state.blocks.filter((b) => b.kind === 'assistant');
+    expect(assistants.length).toBeGreaterThan(1);
+    expect(assistants.map((b) => b.continuation === true)).toEqual([
+      false,
+      ...assistants.slice(1).map(() => true),
+    ]);
+
+    // 一条回复 = 一个 ⏺，不管它被切成了几段。
+    const rendered = state.blocks.flatMap((b) => renderBlock(b, 60, theme));
+    expect(rendered.filter((line) => line.includes('⏺'))).toHaveLength(1);
+
+    // 工具调用打断之后，下一段重新起头。
+    state = reduceTuiState(
+      state,
+      { type: 'tool_end', id: 't1' as ToolCallId, name: 'read', isError: false, durationMs: 5, preview: 'ok' },
+      200,
+    );
+    state = reduceTuiState(state, { type: 'text_delta', delta: '继续。\n\n' }, 300);
+    const resumed = state.blocks.at(-1);
+    expect(resumed).toMatchObject({ kind: 'assistant', text: '继续。' });
+    expect(resumed?.kind === 'assistant' && resumed.continuation).toBeUndefined();
+  });
+
+  it('commits pending text before a permission request and clears it on resolve', () => {
     let state = reduceTuiState(
       createInitialTuiState(),
       { type: 'turn_start', turn: 1 },
@@ -196,11 +228,53 @@ describe('TUI pure reducer and renderer', () => {
     expect(state.phase).toBe('confirming');
 
     state = reduceTuiState(state, { type: 'permission_resolved', decision: 'deny' }, 300);
-    expect(state.blocks).toHaveLength(2);
-    expect(state.blocks[1]).toMatchObject({
+    expect(state.pendingPermission).toBeUndefined();
+  });
+
+  // 一次调用同时出现「⏺ git status / ⎿ 已允许 / {"cmd":"git status"}」和
+  // 「⏺ Bash(git status)」时，用户看到的是同一条命令被念了两三遍。allow/deny
+  // 的结果紧接着就由 tool block 完整表达，不再另记一条。
+  it.each(['allow', 'deny'] as const)(
+    'commits no transcript block for a %s decision',
+    (decision) => {
+      let state = reduceTuiState(
+        createInitialTuiState(),
+        {
+          type: 'permission_request',
+          req: { toolName: 'bash', summary: 'git status' },
+        },
+        0,
+      );
+      state = reduceTuiState(state, { type: 'permission_resolved', decision }, 10);
+      expect(state.blocks).toEqual([]);
+    },
+  );
+
+  it('commits a standing-grant block only for allowAlways', () => {
+    // 「本会话不再询问」意味着后续同名调用会静默放行——这件事没有别的
+    // 地方能看见，所以它是唯一值得留痕的决定。
+    let state = reduceTuiState(
+      createInitialTuiState(),
+      {
+        type: 'permission_request',
+        req: {
+          toolName: 'bash',
+          summary: 'git status',
+          sandboxReason: 'network access',
+        },
+      },
+      0,
+    );
+    state = reduceTuiState(
+      state,
+      { type: 'permission_resolved', decision: 'allowAlways' },
+      10,
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
       kind: 'permission',
-      summary: 'rm -f /tmp/x',
-      decision: 'deny',
+      toolName: 'bash',
+      sandboxReason: 'network access',
     });
     expect(state.pendingPermission).toBeUndefined();
   });
@@ -253,6 +327,113 @@ describe('TUI pure reducer and renderer', () => {
     expect(state.blocks[0]).toMatchObject({ kind: 'thinking', text: '让我想想\n这个问题' });
 
     expect(renderTuiFrame(state, 80, 100, theme).transcript).toEqual(state.blocks);
+  });
+});
+
+/**
+ * pi-tui 的 Component.render 契约是「一个数组元素 = 一个物理行」。元素里混进
+ * '\n' 时 TuiMainScreen 会多写出几个物理行、却只按一行推进光标，之后每一帧都
+ * 在错位的行号上做差分——屏幕上表现为不断重复的残行和被写掉半截的状态栏。
+ * 而 visibleWidth() 把 '\n' 算作 0 宽，pi-tui 自带的超宽断言完全拦不住它，
+ * 所以这条不变量必须自己测。
+ */
+describe('每个渲染出来的元素都是恰好一个物理行', () => {
+  const WIDTH = 40;
+  const MULTILINE = '第一行\n第二行\n第三行';
+
+  const bodies: TranscriptBlockBody[] = [
+    { kind: 'user', text: MULTILINE },
+    { kind: 'assistant', text: `段落\n\n\`\`\`\ncode\n\`\`\`` },
+    { kind: 'assistant', text: MULTILINE, continuation: true },
+    { kind: 'thinking', text: MULTILINE },
+    {
+      kind: 'tool',
+      toolId: 'call-1' as ToolCallId,
+      name: 'bash',
+      summary: 'bash ls',
+      isError: false,
+      durationMs: 3,
+      preview: `Exit code: 0\n${MULTILINE}`,
+      display: { kind: 'bash', exitCode: 0, stdoutLines: 3, stderrLines: 0 },
+    },
+    {
+      kind: 'tool',
+      toolId: 'call-2' as ToolCallId,
+      name: 'edit',
+      summary: 'edit a.ts',
+      isError: false,
+      durationMs: 3,
+      preview: MULTILINE,
+      display: {
+        kind: 'diff',
+        path: 'a.ts',
+        added: 1,
+        removed: 1,
+        hunks: [
+          {
+            oldStart: 1,
+            newStart: 1,
+            lines: [
+              { op: 'remove', text: MULTILINE },
+              { op: 'add', text: MULTILINE },
+            ],
+          },
+        ],
+      },
+    },
+    { kind: 'permission', toolName: 'bash', sandboxReason: MULTILINE },
+    { kind: 'notice', level: 'warn', text: MULTILINE },
+    { kind: 'error', text: MULTILINE },
+    { kind: 'admissionDenied', reason: MULTILINE, retryAfterMs: null },
+  ];
+
+  it.each(bodies.map((body) => [body.kind, body] as const))(
+    'renderBlock(%s) emits no embedded newline and stays inside the width',
+    (_kind, body) => {
+      for (const line of renderBlock({ id: 1, ...body }, WIDTH, theme, {
+        showThinking: true,
+        thinkingMaxLines: 12,
+      })) {
+        expect(line).not.toContain('\n');
+        expect(visibleWidth(line)).toBeLessThanOrEqual(WIDTH);
+      }
+    },
+  );
+
+  it('renderTuiFrame keeps an unterminated code fence out of a single live line', () => {
+    // 真实触发路径：模型开了 ``` 却还没闭合，segmentMarkdown 会把整段代码块
+    // 都留在 pendingText 里，于是「一行」live 文本里塞了十几个换行。
+    let state = reduceTuiState(createInitialTuiState(), { type: 'turn_start', turn: 1 }, 0);
+    state = reduceTuiState(
+      state,
+      { type: 'text_delta', delta: '照抄这条：\n\n```\nfeat: 复刻展示与样式\nsecond line\n' },
+      10,
+    );
+    expect(state.pendingText).toContain('\n');
+
+    const live = renderTuiFrame(state, WIDTH, 20, theme).live;
+    expect(live.some((line) => line.includes('feat: 复刻展示与样式'))).toBe(true);
+    for (const line of live) {
+      expect(line).not.toContain('\n');
+      expect(visibleWidth(line)).toBeLessThanOrEqual(WIDTH);
+    }
+  });
+
+  it('bounds the live区域 so a long fence cannot push the transcript off screen', () => {
+    let state = reduceTuiState(createInitialTuiState(), { type: 'turn_start', turn: 1 }, 0);
+    const fence = `\`\`\`\n${Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n')}\n`;
+    state = reduceTuiState(state, { type: 'text_delta', delta: fence }, 10);
+    const live = renderTuiFrame(state, WIDTH, 20, theme).live;
+    expect(live.length).toBeLessThanOrEqual(8);
+    // 看到的是最新的尾部，不是几十行之前的开头。
+    expect(live.join('\n')).toContain('line 49');
+  });
+
+  it('catches a violation, so the invariant is not a placebo', () => {
+    const smuggled = ['ok', 'first\nsecond'];
+    expect(smuggled.some((line) => line.includes('\n'))).toBe(true);
+    // visibleWidth 把 '\n' 当 0 宽——这正是 pi-tui 的超宽断言漏掉它的原因。
+    expect(visibleWidth('first\nsecond')).toBe(11);
   });
 });
 

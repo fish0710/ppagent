@@ -387,4 +387,30 @@ listener 用 `matchesKey(ctrl+c)` 实现“首次取消、1.5 秒内再次退出
 模态 listener，处理 y/n/Ctrl+C 后必须 resolve 并卸载。进程级 SIGINT 只作为外部信号兜底。宽字符、
 光标、粘贴、差分和 ANSI 输出交给 pi-tui，项目只保留 UIEvent reducer 与业务文案。
 
+### 12.3 渲染出去的每个数组元素必须是恰好一个物理行
+
+**风险**：pi-tui 的 `Component.render` 契约是「一个数组元素 = 一个物理行」，`TuiMainScreen` 逐元素写
+`\x1b[2K` + 内容 + `\r\n`。元素里混进 `\n` 会多写出几个物理行、却只按一行推进光标，此后每一帧都在
+错位的行号上做差分——屏幕上表现为不断堆积的残行和被写掉半截的状态栏。它比"某一行显示得难看"严重
+一个量级：坏的不是那一行，是整块屏幕。pi-tui 自带的超宽断言拦不住，因为 `visibleWidth()` 把 `\n`
+算作 0 宽；`truncateToWidth()` 同样不认换行，长度没超限时原样返回。真实触发路径是未闭合的 ``` 围栏：
+`segmentMarkdown` 会把整段代码块留在 `pendingText` 里，而 live 区域曾经把它当一行 push 出去。
+
+**修法**：`toSingleLines()` 作为显式不变量，在三处设防——加 `⎿`/缩进前缀之前先拆（保证续行前缀跟着
+走）、`renderBlock()` 出口兜底、交给 pi-tui 之前的 `TuiDocument.render()` 再兜一次。live 区域的
+`pendingText` 按 `\n` 拆开并只保留末尾若干行。自检：对每个 block kind 喂带换行的对抗性文本，断言
+"无 `\n` 且 `visibleWidth <= width`"，并附一条证明该断言能拒绝坏输入的用例。
+
+### 12.4 权限提示与工具调用是同一件事的两次展示
+
+**风险**：把每次权限决定都提交进 transcript，且用了和工具调用同一个 `⏺`，屏幕上同一条命令会出现
+两三次——header 一次、原始参数 JSON 一次、真正的 tool block 再一次。会话级 allowAlways 记忆命中后
+不会弹窗，但 `permission_request`/`permission_resolved` 照发，于是每次静默放行都白白多出三行。
+`describe()` 已经给出人话摘要时还附 `safeStringify(args)`，对 `write` 意味着整份文件内容进弹窗。
+
+**修法**：`detail` 只在 `describe()` 没能给出摘要时才附（此时摘要退化成通用模板，用户确实需要原始
+参数）。allow/deny 不提交 block——结果由紧随其后的 tool block 完整表达，拒绝会变成一条 `isError`
+的工具结果。只有 allowAlways 留痕，因为"本会话不再询问"没有别的地方能看见；渲染成不带 `⏺` 的单行
+旁注。同理，`segmentMarkdown` 切出的多个 assistant block 属于同一条回复，只有第一段带 `⏺`。
+
 ---

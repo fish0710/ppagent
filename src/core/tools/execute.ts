@@ -270,18 +270,22 @@ async function runTool(
 }
 
 function permissionRequest(tool: Tool, args: unknown): PermissionRequest {
-  let summary = `Execute privileged tool ${tool.name}`;
+  let described: string | undefined;
   if (tool.describe !== undefined) {
     try {
-      const described = tool.describe(args).trim();
-      if (described.length > 0) summary = described;
+      const text = tool.describe(args).trim();
+      if (text.length > 0) described = text;
     } catch {
       // 权限摘要失败不能绕过权限检查；退回保守模板。
     }
   }
+  // describe() 成功时 detail 只会把同一件事再用 JSON 说一遍（`git status` 旁边
+  // 挂个 {"cmd":"git status"}），write 更糟——整份文件内容会被塞进确认弹窗。
+  // 只有摘要退回到通用模板、用户无从判断要批准什么时，原始参数才是有用信息。
+  if (described !== undefined) return { toolName: tool.name, summary: described };
   return {
     toolName: tool.name,
-    summary,
+    summary: `Execute privileged tool ${tool.name}`,
     detail: safeStringify(args),
   };
 }

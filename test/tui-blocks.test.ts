@@ -37,6 +37,19 @@ describe('renderBlock: assistant', () => {
     const lines = renderBlock(block({ kind: 'assistant', text: '**bold** text' }), WIDTH, theme);
     expect(lines.join('\n')).toContain('bold');
   });
+
+  // 一条回复被 segmentMarkdown 切成好几个 block，每个都打 ⏺ 的话，读起来
+  // 就像模型连续发了五次言。
+  it('drops the ⏺ on a continuation segment and separates it with a blank line', () => {
+    const lines = renderBlock(
+      block({ kind: 'assistant', text: '第二段', continuation: true }),
+      WIDTH,
+      theme,
+    );
+    expect(lines[0]).toBe('');
+    expect(lines[1]!.startsWith('  ')).toBe(true);
+    expect(lines.join('\n')).not.toContain('⏺');
+  });
 });
 
 describe('renderBlock: thinking', () => {
@@ -179,34 +192,25 @@ describe('renderBlock: tool', () => {
 });
 
 describe('renderBlock: permission', () => {
-  it.each([
-    ['allow', '已允许'],
-    ['allowAlways', '已允许，本会话不再询问'],
-    ['deny', '已拒绝'],
-  ] as const)('renders the %s decision label', (decision, label) => {
-    const lines = renderBlock(
-      block({ kind: 'permission', summary: 'rm -f /tmp/x', decision }),
-      WIDTH,
-      theme,
-    );
-    expect(lines[0]).toContain('rm -f /tmp/x');
-    expect(lines.join('\n')).toContain(label);
+  it('is a single line and never wears the ⏺ of a tool call', () => {
+    const lines = renderBlock(block({ kind: 'permission', toolName: 'bash' }), WIDTH, theme);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('本会话不再询问 bash');
+    // ⏺ 属于紧随其后的那条真正的工具调用；这行只是一条旁注。
+    expect(lines[0]).not.toContain('⏺');
   });
 
-  it('shows sandboxReason and detail as extra result lines when present', () => {
+  it('names the sandbox reason, because that is what the grant is scoped to', () => {
     const lines = renderBlock(
       block({
         kind: 'permission',
-        summary: 'write outside sandbox',
+        toolName: 'write',
         sandboxReason: 'path escapes workspace',
-        detail: '{"path":"/etc/passwd"}',
-        decision: 'deny',
       }),
       WIDTH,
       theme,
     );
     expect(lines.join('\n')).toContain('path escapes workspace');
-    expect(lines.join('\n')).toContain('/etc/passwd');
   });
 });
 

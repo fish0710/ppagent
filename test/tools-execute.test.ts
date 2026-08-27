@@ -269,6 +269,37 @@ describe('executeTool', () => {
     });
   });
 
+  // describe() 成功时 detail 只是把同一件事再用 JSON 说一遍——确认弹窗里
+  // 「git status」旁边挂个 {"cmd":"git status"}，write 更糟：整份文件内容都会
+  // 被塞进弹窗。只有摘要退回通用模板、用户无从判断要批准什么时它才有用。
+  it('omits the raw-argument detail when the tool can describe itself', async () => {
+    const check = vi.fn(async () => 'allow' as const);
+    const described: Tool = {
+      ...orderedTool([]),
+      requiresAdmission: false,
+      describe: (args) => `run ${(args as { value: string }).value}`,
+    };
+    await executeTool(described, { value: 'ok' }, CONTEXT, deps({ permissions: { check } }), OPTIONS);
+    expect(check).toHaveBeenCalledWith(
+      { toolName: 'ordered', summary: 'run ok' },
+      INTERACTION,
+    );
+  });
+
+  it('falls back to raw arguments when describe is absent, so the prompt still says what it approves', async () => {
+    const check = vi.fn(async () => 'allow' as const);
+    const opaque: Tool = { ...orderedTool([]), requiresAdmission: false };
+    await executeTool(opaque, { value: 'ok' }, CONTEXT, deps({ permissions: { check } }), OPTIONS);
+    expect(check).toHaveBeenCalledWith(
+      {
+        toolName: 'ordered',
+        summary: 'Execute privileged tool ordered',
+        detail: '{"value":"ok"}',
+      },
+      INTERACTION,
+    );
+  });
+
   it('does not ask twice when one privileged approval also covers an escalatable path', async () => {
     const check = vi.fn(async () => 'allow' as const);
     const execute = vi.fn(async () => textOutput('allowed once'));
@@ -367,6 +398,17 @@ describe('executeTool', () => {
     });
   });
 });
+
+function deps(
+  overrides: Partial<Parameters<typeof executeTool>[3]> = {},
+): Parameters<typeof executeTool>[3] {
+  return {
+    admission: new StubAdmissionController(),
+    permissions: new StubPermissionPolicy(),
+    sandbox: new PassthroughSandbox(),
+    ...overrides,
+  };
+}
 
 function orderedTool(order: string[]): Tool {
   return {

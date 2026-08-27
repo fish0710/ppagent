@@ -2,7 +2,6 @@ import { Markdown, truncateToWidth, wrapTextWithAnsi } from '@earendil-works/pi-
 import type {
   CompactTrigger,
   LoopEndReason,
-  PermissionDecision,
   ResourceSnapshot,
   ToolCallId,
   ToolDisplay,
@@ -23,8 +22,12 @@ export type TranscriptBlock = { readonly id: BlockId } & TranscriptBlockBody;
 
 export type TranscriptBlockBody =
   | { kind: 'user'; text: string }
-  /** 一段完整的 markdown（段落/列表/围栏），来自 segmentMarkdown 的切分。 */
-  | { kind: 'assistant'; text: string }
+  /**
+   * 一段完整的 markdown（段落/列表/围栏），来自 segmentMarkdown 的切分。
+   * continuation 表示它接在同一条回复的上一段之后：只有整条回复的第一段
+   * 带 ⏺，其余段落缩进对齐——每段都打一个 ⏺ 会把一条回复读成好几次发言。
+   */
+  | { kind: 'assistant'; text: string; continuation?: boolean }
   | { kind: 'thinking'; text: string }
   | {
       kind: 'tool';
@@ -37,13 +40,12 @@ export type TranscriptBlockBody =
       preview: string;
       display?: ToolDisplay;
     }
-  | {
-      kind: 'permission';
-      summary: string;
-      detail?: string;
-      sandboxReason?: string;
-      decision: PermissionDecision;
-    }
+  /**
+   * 只为 allowAlways 提交：allow/deny 的结果紧接着就由 tool block 完整表达
+   * （拒绝会变成一条 isError 的工具结果），再单独记一条就是同一件事说两遍。
+   * "本会话不再询问"是唯一没有别处能看见的事实——后续同名工具会静默放行。
+   */
+  | { kind: 'permission'; toolName: string; sandboxReason?: string }
   | { kind: 'notice'; level: 'info' | 'warn' | 'error'; text: string }
   | {
       kind: 'compaction';
@@ -80,6 +82,18 @@ export const DEFAULT_RENDER_OPTIONS: TuiRenderOptions = {
 const RESULT_PREFIX = '  ⎿  ';
 const RESULT_CONTINUATION = '     ';
 const MAX_BASH_PREVIEW_LINES = 6;
+const ASSISTANT_MARKER = '⏺ ';
+
+/**
+ * pi-tui 的 Component.render 契约是「一个数组元素 = 一个物理行」；元素里混进
+ * '\n' 时 TuiMainScreen 会多写出几行、却只按一行做光标推进，随后所有差分渲染
+ * 的行号都会错位（表现为重复的残行、被覆盖半截的状态栏）。而 visibleWidth()
+ * 把 '\n' 算作 0 宽，它自带的超宽断言也拦不住。所有可能带换行的外来文本
+ * （工具输出、权限 detail、markdown 渲染结果）都要先过这里。
+ */
+export function toSingleLines(lines: readonly string[]): string[] {
+  return lines.flatMap((line) => (line.includes('\n') ? line.split('\n') : [line]));
+}
 
 /** 纯函数：一个 block -> 若干行；无 IO、无缓存（缓存在 IO 边的 Transcript 组件里）。 */
 export function renderBlock(
@@ -88,12 +102,23 @@ export function renderBlock(
   theme: TuiTheme,
   options: TuiRenderOptions = DEFAULT_RENDER_OPTIONS,
 ): readonly string[] {
+  // 各分支自己负责在正确的位置断行（续行前缀要跟着走），这里只是兜底：
+  // 任何漏网的换行都不许离开这个函数。
+  return toSingleLines(renderBlockBody(block, width, theme, options));
+}
+
+function renderBlockBody(
+  block: TranscriptBlock,
+  width: number,
+  theme: TuiTheme,
+  options: TuiRenderOptions,
+): readonly string[] {
   const safeWidth = Math.max(1, width);
   switch (block.kind) {
     case 'user':
       return renderPrefixedLines(block.text.split('\n'), '> ', '  ', theme.user, safeWidth);
     case 'assistant':
-      return renderMarkdownBlock(block.text, '⏺ ', theme.assistantMark, theme, safeWidth);
+      return renderAssistantBlock(block, theme, safeWidth);
     case 'thinking':
       return options.showThinking
         ? renderThinkingBlock(block.text, theme, safeWidth, options.thinkingMaxLines)
@@ -143,21 +168,24 @@ function renderPrefixedLines(
   return out;
 }
 
-function renderMarkdownBlock(
-  text: string,
-  marker: string,
-  markerStyle: (s: string) => string,
+function renderAssistantBlock(
+  block: Extract<TranscriptBlockBody, { kind: 'assistant' }>,
   theme: TuiTheme,
   width: number,
 ): string[] {
-  const indent = visibleLength(marker);
+  const indent = visibleLength(ASSISTANT_MARKER);
   const contentWidth = Math.max(1, width - indent);
-  const markdown = new Markdown(text, 0, 0, theme.markdown);
-  const lines = markdown.render(contentWidth);
+  const markdown = new Markdown(block.text, 0, 0, theme.markdown);
+  const lines = toSingleLines(markdown.render(contentWidth));
   if (lines.length === 0) return [];
-  return lines.map((line, index) =>
-    index === 0 ? `${markerStyle(marker)}${line}` : `${' '.repeat(indent)}${line}`,
+  const body = lines.map((line, index) =>
+    index === 0 && block.continuation !== true
+      ? `${theme.assistantMark(ASSISTANT_MARKER)}${line}`
+      : `${' '.repeat(indent)}${line}`,
   );
+  // segmentMarkdown 把段落间的空行当成切分边界吃掉了；续段自己补回来，
+  // 否则同一条回复的各段会挤成没有呼吸感的一坨。
+  return block.continuation === true ? ['', ...body] : body;
 }
 
 function renderThinkingBlock(
@@ -222,7 +250,8 @@ function renderToolResultLines(
 
 function renderResultLines(lines: readonly string[], width: number): string[] {
   const out: string[] = [];
-  lines.forEach((line, index) => {
+  // truncateToWidth 不认换行（'\n' 宽度算 0，长度不超限时原样返回），必须先拆。
+  toSingleLines(lines).forEach((line, index) => {
     const prefix = index === 0 ? RESULT_PREFIX : RESULT_CONTINUATION;
     const available = Math.max(1, width - visibleLength(prefix));
     out.push(`${prefix}${truncateToWidth(line, available, '…')}`);
@@ -325,23 +354,25 @@ function diffGutterWidth(display: Extract<ToolDisplay, { kind: 'diff' }>): numbe
   return Math.max(4, String(max).length);
 }
 
-const PERMISSION_LABELS: Readonly<Record<PermissionDecision, string>> = {
-  allow: '已允许',
-  allowAlways: '已允许，本会话不再询问',
-  deny: '已拒绝',
-};
-
+/**
+ * 一行，不带 ⏺——它不是一次工具调用，紧随其后的 tool block 才是。这里只说
+ * 一件别处看不到的事：这个工具在本会话里已经不会再弹确认框了。
+ */
 function renderPermissionBlock(
   block: Extract<TranscriptBlockBody, { kind: 'permission' }>,
   theme: TuiTheme,
   width: number,
 ): string[] {
-  const mark = block.decision === 'deny' ? theme.toolErrorMark('⊘') : theme.toolMark('⏺');
-  const header = truncateToWidth(`${mark} ${block.summary}`, width, '…');
-  const resultLines: string[] = [PERMISSION_LABELS[block.decision]];
-  if (block.sandboxReason !== undefined) resultLines.push(`沙箱：${block.sandboxReason}`);
-  if (block.detail !== undefined) resultLines.push(block.detail);
-  return [header, ...renderResultLines(resultLines.map((line) => theme.muted(line)), width)];
+  // 沙箱例外的放行范围由 reason 决定而不是工具名（见 InteractivePermissionPolicy
+  // 的 alwaysKey），写清楚才不会让用户以为整个工具都被放行了。
+  const scope =
+    block.sandboxReason === undefined
+      ? block.toolName
+      : `${block.toolName}（沙箱例外：${block.sandboxReason}）`;
+  return renderWrapped(
+    `${theme.accent('ℹ')} ${theme.muted(`本会话不再询问 ${scope}`)}`,
+    width,
+  );
 }
 
 function renderNoticeBlock(

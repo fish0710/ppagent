@@ -5,7 +5,7 @@
 {"type":"tool_start","id":"read-1","name":"read","args":{"path":"src/auth.ts"}}
 {"type":"tool_end","id":"read-1","name":"read","isError":false,"preview":"export function auth() {}","durationMs":1200}
 {"type":"tool_start","id":"bash-1","name":"bash","args":{"cmd":"rm -f /tmp/test.txt"}}
-{"type":"permission_request","req":{"toolName":"bash","summary":"rm -f /tmp/test.txt","detail":"{\"cmd\":\"rm -f /tmp/test.txt\"}"}}
+{"type":"permission_request","req":{"toolName":"bash","summary":"rm -f /tmp/test.txt"}}
 {"type":"permission_resolved","decision":"deny"}
 {"type":"tool_end","id":"bash-1","name":"bash","isError":true,"preview":"User denied tool execution.","durationMs":10}
 {"type":"turn_start","turn":2,"contextTokens":6200,"contextWindow":8000}

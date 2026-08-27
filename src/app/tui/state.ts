@@ -257,26 +257,29 @@ function endCompaction(state: TuiState): TuiState {
   return { ...rest, phase: phaseBeforeCompaction ?? state.phase };
 }
 
+/**
+ * allow/deny 不提交 block：紧随其后的 tool block 已经完整表达了结果（拒绝会
+ * 变成一条 isError 的工具结果），再记一条只会让同一条命令在屏幕上出现两三次。
+ * 只有 allowAlways 留痕——"本会话不再询问"意味着后续同名调用会静默放行，
+ * 这件事没有任何别的地方能看见。
+ */
 function resolvePermission(
   state: TuiState,
   decision: PermissionDecision,
 ): TuiState {
   const { phaseBeforeConfirmation, pendingPermission, ...rest } = state;
-  const summary = pendingPermission?.summary ?? '';
-  return appendBlock(
-    { ...rest, phase: phaseBeforeConfirmation ?? inferredActivePhase(state) },
-    {
-      kind: 'permission',
-      summary,
-      decision,
-      ...(pendingPermission?.detail === undefined
-        ? {}
-        : { detail: pendingPermission.detail }),
-      ...(pendingPermission?.sandboxReason === undefined
-        ? {}
-        : { sandboxReason: pendingPermission.sandboxReason }),
-    },
-  );
+  const resolved: TuiState = {
+    ...rest,
+    phase: phaseBeforeConfirmation ?? inferredActivePhase(state),
+  };
+  if (decision !== 'allowAlways') return resolved;
+  return appendBlock(resolved, {
+    kind: 'permission',
+    toolName: pendingPermission?.toolName ?? '',
+    ...(pendingPermission?.sandboxReason === undefined
+      ? {}
+      : { sandboxReason: pendingPermission.sandboxReason }),
+  });
 }
 
 function finishTurn(
@@ -353,9 +356,11 @@ function appendBlock(state: TuiState, body: TranscriptBlockBody): TuiState {
 function appendBlocks(state: TuiState, bodies: readonly TranscriptBlockBody[]): TuiState {
   if (bodies.length === 0) return state;
   let nextId = state.nextBlockId;
+  let previousKind = state.blocks[state.blocks.length - 1]?.kind;
   const newBlocks = bodies.map((body) => {
-    const block: TranscriptBlock = { id: nextId, ...body };
+    const block: TranscriptBlock = { id: nextId, ...markContinuation(body, previousKind) };
     nextId += 1;
+    previousKind = block.kind;
     return block;
   });
   return {
@@ -363,6 +368,19 @@ function appendBlocks(state: TuiState, bodies: readonly TranscriptBlockBody[]): 
     blocks: [...state.blocks, ...newBlocks],
     nextBlockId: nextId,
   };
+}
+
+/**
+ * segmentMarkdown 把一条回复切成多个 assistant block，但它们是同一次发言：
+ * 只有第一段带 ⏺，后续段落标成续段。任何别的 block（工具、指标、用户输入）
+ * 落在中间都算这条回复结束了，下一段重新起头。
+ */
+function markContinuation(
+  body: TranscriptBlockBody,
+  previousKind: TranscriptBlock['kind'] | undefined,
+): TranscriptBlockBody {
+  if (body.kind !== 'assistant' || previousKind !== 'assistant') return body;
+  return { ...body, continuation: true };
 }
 
 function inferredActivePhase(state: TuiState): TuiPhase {
