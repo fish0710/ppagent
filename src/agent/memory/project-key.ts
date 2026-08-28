@@ -28,6 +28,9 @@ async function readGitRemote(cwd: string): Promise<string | undefined> {
     const { stdout } = await execFileAsync('git', ['remote', 'get-url', 'origin'], {
       cwd,
       timeout: 5000,
+      // 钩子/CI 环境会注入 GIT_DIR 等变量，会让 git 忽略 cwd 去读仓库配置，
+      // 把「非仓库目录」误判成当前仓库的 remote。必须清掉再探测。
+      env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined, GIT_OBJECT_DIRECTORY: undefined, GIT_COMMON_DIR: undefined },
     });
     const trimmed = stdout.trim();
     return trimmed.length === 0 ? undefined : trimmed;

@@ -235,6 +235,25 @@ describe('deriveProjectKey', () => {
       await rm(root, { recursive: true });
     }
   });
+
+  it('ignores a GIT_DIR inherited from hook/CI environments when probing cwd', async () => {
+    // pre-push 等 git 钩子会把 GIT_DIR 注入环境，git 会因此忽略 cwd 去读
+    // 仓库配置。这里用「非仓库目录 + 伪造 GIT_DIR」复现钩子环境，探测
+    // 必须仍然回退到 realpath，而不是返回当前仓库的 remote（回归测试）。
+    const root = await mkdtemp(join(tmpdir(), 'ppagent-not-a-repo-'));
+    try {
+      const prev = process.env.GIT_DIR;
+      process.env.GIT_DIR = process.cwd();
+      try {
+        expect(await deriveProjectKey(root)).toBe(await realpathOf(root));
+      } finally {
+        if (prev === undefined) delete process.env.GIT_DIR;
+        else process.env.GIT_DIR = prev;
+      }
+    } finally {
+      await rm(root, { recursive: true });
+    }
+  });
 });
 
 async function realpathOf(path: string): Promise<string> {
