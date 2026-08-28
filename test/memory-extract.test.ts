@@ -31,13 +31,17 @@ use BM25 for retrieval: no ML dependency available
 ## Pitfalls
 bash tool must spawn detached or it leaks orphan processes`;
 
-function extractor(provider: Provider, overrides: Partial<{ maxTokens: number; timeoutMs: number }> = {}) {
+function extractor(
+  provider: Provider,
+  overrides: Partial<{ maxTokens: number; timeoutMs: number; notify: (message: string) => void }> = {},
+) {
   return new LlmMemoryExtractor({
     provider,
     model: MODEL,
     maxTokens: overrides.maxTokens ?? 256,
     timeoutMs: overrides.timeoutMs ?? 5_000,
     idGenerator: idSequence(),
+    ...(overrides.notify === undefined ? {} : { notify: overrides.notify }),
   });
 }
 
@@ -143,6 +147,31 @@ describe('LlmMemoryExtractor', () => {
     const provider = new FauxProvider({ turns: [errorTurn('local server unreachable')] });
     const records = await extractor(provider).extract(input(), new AbortController().signal);
     expect(records).toEqual([]);
+  });
+
+  it('surfaces the concrete provider error in the notify message, not a fixed "extraction failed"', async () => {
+    const notified: string[] = [];
+    const provider = new FauxProvider({
+      turns: [errorTurn('HTTP 400: max context length exceeded')],
+    });
+    const records = await extractor(provider, { notify: (message) => notified.push(message) }).extract(
+      input(),
+      new AbortController().signal,
+    );
+    expect(records).toEqual([]);
+    expect(notified).toHaveLength(1);
+    expect(notified[0]).toContain('HTTP 400: max context length exceeded');
+  });
+
+  it('treats an empty model response (no tool call) as a legitimate "nothing durable" outcome, not a failure', async () => {
+    const notified: string[] = [];
+    const provider = new FauxProvider({ turns: [textTurn('')] });
+    const records = await extractor(provider, { notify: (message) => notified.push(message) }).extract(
+      input(),
+      new AbortController().signal,
+    );
+    expect(records).toEqual([]);
+    expect(notified).toHaveLength(0);
   });
 
   it('degrades to an empty array on its own timeout without throwing', async () => {

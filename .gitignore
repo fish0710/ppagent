@@ -12,3 +12,4 @@ __pycache__/
 terminal-bench-*
 jobs/
 probe-out/
+worktrees/

@@ -117,11 +117,17 @@ export class LlmMemoryExtractor implements MemoryExtractor {
     let text: string;
     try {
       text = await this.#generate(input, signal);
-    } catch {
-      // 失败原因（超时/掉线/被拒）对结果没有区别——都是"这次不产出"。
-      this.#options.notify?.('记忆抽取失败，本次会话不产出新记忆');
+    } catch (error) {
+      // 失败原因（超时/掉线/被拒/模型违约发工具调用）对结果没有区别——
+      // 都是"这次不产出"；但对排查有区别，不能吞成一句固定的文案。
+      // 透传具体错误，否则用户看到的"记忆抽取失败"无从分析（本次真实
+      // 运行就是立即失败、无 60s 超时，只能靠错误内容定位）。
+      const reason = error instanceof Error ? error.message : String(error);
+      this.#options.notify?.(`记忆抽取失败：${reason}`);
       return [];
     }
+    // 模型按指令合理返回空 = 没有可沉淀的内容，不是失败。
+    if (text.trim().length === 0) return [];
     const parsed = parseSummarySections(text);
     if (!parsed.matched) return [];
 
@@ -171,11 +177,11 @@ export class LlmMemoryExtractor implements MemoryExtractor {
     } finally {
       control.dispose();
     }
-    if (text.trim().length === 0) {
-      throw new Error(
-        sawToolCall ? '模型只发起了工具调用，没有产出抽取结果' : '抽取调用没有产出任何文本',
-      );
+    if (text.trim().length === 0 && sawToolCall) {
+      throw new Error('模型只发起了工具调用，没有产出抽取结果');
     }
+    // 空文本且没发工具调用 = 模型按 EXTRACT_INSTRUCTION 合理判断"没有可沉淀
+    // 内容"，返回空串交调用方走合法路径，不是失败。
     return text;
   }
 
